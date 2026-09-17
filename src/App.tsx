@@ -8,6 +8,8 @@ import { CustomersView } from './features/customers/CustomersView';
 import { ReportsView } from './features/reports/ReportsView';
 import { PublicTrackingView } from './features/tracking/PublicTrackingView';
 import { ShiftManagerModal } from './features/shifts/ShiftManagerModal';
+import { TransitListView } from './features/transit/TransitListView';
+import { TransitDetailView } from './features/transit/TransitDetailView';
 
 export const App: React.FC = () => {
   const [isShiftModalOpen, setIsShiftModalOpen] = useState(false);
@@ -31,6 +33,8 @@ export const App: React.FC = () => {
                   <Route path="/production" element={<ProductionKanbanView />} />
                   <Route path="/customers" element={<CustomersView />} />
                   <Route path="/reports" element={<ReportsView />} />
+                  <Route path="/transit" element={<TransitListView />} />
+                  <Route path="/transit/:id" element={<TransitDetailView />} />
                 </Routes>
               </main>
 

@@ -14,6 +14,7 @@ import {
   Users,
   BarChart3,
   Search,
+  Truck,
 } from 'lucide-react';
 import { Link, useLocation } from 'react-router-dom';
 import { formatIDR } from '../../core/utils/currency';
@@ -52,6 +53,7 @@ export const Navbar: React.FC<NavbarProps> = ({ onOpenShiftModal }) => {
     { label: 'Kasir POS', path: '/', icon: ShoppingBag },
     { label: 'Pesanan', path: '/orders', icon: Search },
     { label: 'Produksi', path: '/production', icon: Layers },
+    { label: 'Transit', path: '/transit', icon: Truck },
     { label: 'Pelanggan', path: '/customers', icon: Users },
     { label: 'Laporan', path: '/reports', icon: BarChart3 },
   ];
@@ -79,7 +81,9 @@ export const Navbar: React.FC<NavbarProps> = ({ onOpenShiftModal }) => {
             <nav className="hidden md:flex items-center gap-1">
               {navItems.map((item) => {
                 const Icon = item.icon;
-                const isActive = location.pathname === item.path;
+                const isActive =
+                  location.pathname === item.path ||
+                  (item.path !== '/' && location.pathname.startsWith(item.path));
                 return (
                   <Link
                     key={item.path}

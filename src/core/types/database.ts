@@ -41,6 +41,20 @@ export type ShiftStatus = 'OPEN' | 'CLOSED' | 'RECONCILED';
 
 export type OperatingMode = 'SIMPLE' | 'STANDARD' | 'ADVANCED';
 
+export type TransitManifestStatus = 
+  | 'DRAFT' 
+  | 'READY_TO_DISPATCH' 
+  | 'IN_TRANSIT' 
+  | 'RECEIVED' 
+  | 'CANCELLED';
+
+export type TransitManifestItemStatus = 
+  | 'EXPECTED' 
+  | 'RECEIVED_OK' 
+  | 'MISSING' 
+  | 'DAMAGED' 
+  | 'WRONG_BRANCH';
+
 export interface Organization {
   id: string;
   name: string;
@@ -199,9 +213,75 @@ export interface CashierShift {
   difference?: number;
   status: ShiftStatus;
   notes?: string;
+  cash_sales?: number;
+  qris_sales?: number;
+  transfer_sales?: number;
+  cash_in?: number;
+  cash_out?: number;
+  refund_amount?: number;
+  transaction_count?: number;
+  variance_note?: string;
   opened_at: string;
   closed_at?: string;
   closed_by?: string;
+}
+
+export interface TransitManifest {
+  id: string;
+  organization_id: string;
+  manifest_number: string;
+  source_branch_id: string;
+  destination_branch_id: string;
+  status: TransitManifestStatus;
+  driver_user_id?: string;
+  vehicle_identifier?: string;
+  notes?: string;
+  discrepancy_summary?: string;
+  total_expected_orders: number;
+  total_received_orders: number;
+  has_discrepancy: boolean;
+  created_by: string;
+  dispatched_by?: string;
+  received_by?: string;
+  cancelled_by?: string;
+  created_at: string;
+  dispatched_at?: string;
+  received_at?: string;
+  cancelled_at?: string;
+  updated_at: string;
+
+  // Joined relations
+  source_branch?: Branch;
+  destination_branch?: Branch;
+  driver?: UserProfile;
+  items?: TransitManifestItem[];
+}
+
+export interface TransitManifestItem {
+  id: string;
+  manifest_id: string;
+  organization_id: string;
+  order_id: string;
+  received_status: TransitManifestItemStatus;
+  discrepancy_notes?: string;
+  added_at: string;
+  received_at?: string;
+  inspected_by?: string;
+
+  // Joined relations
+  order?: Order;
+}
+
+export interface TransitManifestHistory {
+  id: string;
+  manifest_id: string;
+  organization_id: string;
+  from_status?: TransitManifestStatus;
+  to_status: TransitManifestStatus;
+  actor_id: string;
+  notes?: string;
+  created_at: string;
+  actor?: UserProfile;
 }
 
 export interface OrderStatusHistory {
