@@ -1,0 +1,38 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-sans: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    -webkit-tap-highlight-color: transparent;
+  }
+}
+
+/* Thermal Receipt Print Styles */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  #thermal-receipt, #thermal-receipt * {
+    visibility: visible;
+  }
+  #thermal-receipt {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 58mm; /* Standard 58mm POS thermal receipt */
+    margin: 0;
+    padding: 2mm;
+    font-size: 11px;
+    line-height: 1.25;
+    color: #000;
+  }
+  @page {
+    size: 58mm auto;
+    margin: 0;
+  }
+}
