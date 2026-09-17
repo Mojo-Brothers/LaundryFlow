@@ -119,12 +119,14 @@ describe('LaundryFlow Acceptance Test — Critical Path', () => {
     const readyOrder = await repository.updateOrderStatus(order.id, 'READY', cashier!.id);
     expect(readyOrder.status).toBe('READY');
 
-    // 9. Verify Public Customer Tracking by Token (without login)
+    // 9. Verify Public Customer Tracking by Token (Sanitized, Zero PII, No Login)
     const trackedOrder = await repository.getOrderByTrackingToken(order.tracking_token);
     expect(trackedOrder).toBeDefined();
-    expect(trackedOrder?.id).toBe(order.id);
+    expect(trackedOrder?.order_number).toBe(order.order_number);
     expect(trackedOrder?.status).toBe('READY');
     expect(trackedOrder?.final_amount).toBe(calc.finalAmount);
+    expect(trackedOrder?.customer_phone).toBeUndefined();
+    expect(trackedOrder?.id).toBeUndefined(); // UUID is kept private
 
     // 10. Complete Pickup
     const completedOrder = await repository.updateOrderStatus(order.id, 'COMPLETED', cashier!.id);

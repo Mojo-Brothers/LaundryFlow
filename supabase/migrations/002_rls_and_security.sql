@@ -1,6 +1,7 @@
 -- ============================================================================
 -- 002_rls_and_security.sql
 -- LaundryFlow SaaS: Row Level Security, Tenant Isolation & Immutability Enforcement
+-- (Phase 1.5 Hardened: Zero Global Read Leak, Isolated Tracking RPC, & Shift Lock)
 -- ============================================================================
 
 -- ----------------------------------------------------------------------------
@@ -78,7 +79,7 @@ CREATE POLICY branches_all_admin ON branches
     );
 
 -- ----------------------------------------------------------------------------
--- 5. RLS POLICIES FOR USERS
+-- 5. RLS POLICIES FOR USERS & BRANCH ACCESS
 -- ----------------------------------------------------------------------------
 CREATE POLICY users_select_policy ON users
     FOR SELECT USING (organization_id = auth_org_id());
@@ -86,6 +87,12 @@ CREATE POLICY users_select_policy ON users
 CREATE POLICY users_manage_admin ON users
     FOR ALL USING (
         organization_id = auth_org_id() AND 
+        EXISTS (SELECT 1 FROM public.users u WHERE u.id = auth.uid() AND u.role IN ('OWNER', 'ADMIN'))
+    );
+
+CREATE POLICY user_branch_access_select ON user_branch_access
+    FOR SELECT USING (
+        user_id = auth.uid() OR
         EXISTS (SELECT 1 FROM public.users u WHERE u.id = auth.uid() AND u.role IN ('OWNER', 'ADMIN'))
     );
 
@@ -131,7 +138,7 @@ CREATE POLICY cashier_shifts_update ON cashier_shifts
     );
 
 -- ----------------------------------------------------------------------------
--- 9. RLS POLICIES FOR ORDERS
+-- 9. RLS POLICIES FOR ORDERS (STRICTLY TENANT & BRANCH ISOLATED)
 -- ----------------------------------------------------------------------------
 CREATE POLICY orders_select_policy ON orders
     FOR SELECT USING (
@@ -155,9 +162,8 @@ CREATE POLICY orders_update_policy ON orders
         (user_has_branch_access(branch_id) OR user_has_branch_access(production_branch_id))
     );
 
--- Public tracking policy for non-logged-in customers using tracking_token
-CREATE POLICY orders_public_tracking_policy ON orders
-    FOR SELECT USING (true); -- Filtered specifically by tracking_token in API query view
+-- NOTE: Global read policy "orders_public_tracking_policy" (USING true) has been
+-- REMOVED. Public customer tracking is strictly delegated to get_public_order_tracking() RPC.
 
 -- ----------------------------------------------------------------------------
 -- 10. RLS POLICIES FOR ORDER ITEMS
@@ -213,13 +219,73 @@ CREATE POLICY audit_logs_insert ON audit_logs
     FOR INSERT WITH CHECK (organization_id = auth_org_id());
 
 -- ----------------------------------------------------------------------------
--- 13. DATA INTEGRITY TRIGGERS (PRICE CALCULATION ENFORCER)
+-- 13. ISOLATED PUBLIC TRACKING RPC (ZERO PII EXPOSURE)
 -- ----------------------------------------------------------------------------
 
--- Enforce calculation of order_items subtotal based on billable_weight and snapshot price
+CREATE OR REPLACE FUNCTION get_public_order_tracking(p_tracking_token TEXT)
+RETURNS JSONB AS $$
+DECLARE
+    v_result JSONB;
+BEGIN
+    IF p_tracking_token IS NULL OR length(trim(p_tracking_token)) < 10 THEN
+        RETURN NULL;
+    END IF;
+
+    SELECT jsonb_build_object(
+        'order_number', o.order_number,
+        'status', o.status,
+        'operating_mode', o.operating_mode,
+        'subtotal', o.subtotal,
+        'discount_amount', o.discount_amount,
+        'delivery_fee', o.delivery_fee,
+        'final_amount', o.final_amount,
+        'paid_amount', o.paid_amount,
+        'remaining_amount', o.remaining_amount,
+        'payment_status', o.payment_status,
+        'promised_ready_at', o.promised_ready_at,
+        'created_at', o.created_at,
+        'branch_name', b.name,
+        'branch_address', b.address,
+        'branch_phone', b.phone,
+        'items', COALESCE((
+            SELECT jsonb_agg(jsonb_build_object(
+                'service_name', oi.service_name_snap,
+                'quantity_or_weight', oi.quantity_or_weight,
+                'billable_weight', oi.billable_weight,
+                'item_type', oi.item_type,
+                'subtotal', oi.subtotal
+            ))
+            FROM order_items oi
+            WHERE oi.order_id = o.id
+        ), '[]'::jsonb)
+    ) INTO v_result
+    FROM orders o
+    JOIN branches b ON b.id = o.branch_id
+    WHERE o.tracking_token = p_tracking_token;
+
+    RETURN v_result;
+END;
+$$ LANGUAGE plpgsql STABLE SECURITY DEFINER;
+
+-- Grant execution to public / anon role
+GRANT EXECUTE ON FUNCTION get_public_order_tracking(TEXT) TO anon, authenticated;
+
+-- ----------------------------------------------------------------------------
+-- 14. DATA INTEGRITY TRIGGERS (PRICE SNAPSHOT & FINANCIAL VALIDATORS)
+-- ----------------------------------------------------------------------------
+
+-- Enforce calculation of order_items subtotal and snap official catalog price
 CREATE OR REPLACE FUNCTION trg_calculate_order_item_subtotal()
 RETURNS TRIGGER AS $$
+DECLARE
+    v_catalog_price NUMERIC(12, 2);
 BEGIN
+    -- Pull canonical unit price from active catalog to prevent malicious client pricing
+    SELECT base_price INTO v_catalog_price FROM services WHERE id = NEW.service_id;
+    IF v_catalog_price IS NOT NULL THEN
+        NEW.unit_price_snap := v_catalog_price;
+    END IF;
+
     NEW.subtotal := ROUND(NEW.unit_price_snap * NEW.billable_weight, 2);
     RETURN NEW;
 END;
@@ -230,6 +296,27 @@ CREATE TRIGGER trg_order_item_subtotal_calc
     BEFORE INSERT OR UPDATE ON order_items
     FOR EACH ROW
     EXECUTE FUNCTION trg_calculate_order_item_subtotal();
+
+-- Enforce calculation of orders final_amount and remaining_amount
+CREATE OR REPLACE FUNCTION trg_validate_order_totals()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_calculated_final NUMERIC(12, 2);
+BEGIN
+    v_calculated_final := GREATEST(0, NEW.subtotal - NEW.discount_amount + NEW.delivery_fee);
+    IF NEW.final_amount <> v_calculated_final THEN
+        NEW.final_amount := v_calculated_final;
+    END IF;
+    NEW.remaining_amount := GREATEST(0, NEW.final_amount - NEW.paid_amount);
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_validate_orders ON orders;
+CREATE TRIGGER trg_validate_orders
+    BEFORE INSERT OR UPDATE ON orders
+    FOR EACH ROW
+    EXECUTE FUNCTION trg_validate_order_totals();
 
 -- Automatically update orders.paid_amount, remaining_amount, and payment_status on payment insert
 CREATE OR REPLACE FUNCTION trg_update_order_payment_totals()
@@ -267,3 +354,20 @@ CREATE TRIGGER trg_order_payment_totals
     AFTER INSERT ON payments
     FOR EACH ROW
     EXECUTE FUNCTION trg_update_order_payment_totals();
+
+-- Protect closed cashier shifts from being tampered with
+CREATE OR REPLACE FUNCTION trg_prevent_closed_shift_mutation()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF OLD.status = 'CLOSED' THEN
+        RAISE EXCEPTION 'Cannot modify or re-open a CLOSED cashier shift. Shift is audit-locked.';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_protect_closed_shifts ON cashier_shifts;
+CREATE TRIGGER trg_protect_closed_shifts
+    BEFORE UPDATE OR DELETE ON cashier_shifts
+    FOR EACH ROW
+    EXECUTE FUNCTION trg_prevent_closed_shift_mutation();

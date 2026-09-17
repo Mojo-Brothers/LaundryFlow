@@ -1,5 +1,7 @@
 // ============================================================================
-// WhatsApp Launcher & Notification Service (Zero Cost & Anti-Banned Protocol)
+// WhatsApp Launcher Engine
+// Note: Messages are initiated by the operator through the official WhatsApp application
+// (Zero direct third-party API subscription cost).
 // ============================================================================
 
 import { Customer, Order, Payment } from '../types/database';
@@ -30,7 +32,7 @@ export function formatIndonesianPhone(phone: string): string {
 export class WhatsAppLauncherService implements NotificationService {
   private baseUrl: string;
 
-  constructor(appBaseUrl = window.location.origin) {
+  constructor(appBaseUrl = typeof window !== 'undefined' ? window.location.origin : 'https://app.laundryflow.id') {
     this.baseUrl = appBaseUrl;
   }
 

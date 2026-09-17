@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { repository } from '../../core/services/repository';
-import { Order, OrderStatus } from '../../core/types/database';
+import { PublicTrackingData, OrderStatus } from '../../core/types/database';
 import { formatIDR } from '../../core/utils/currency';
 import {
   Sparkles,
@@ -15,7 +15,7 @@ import {
 
 export const PublicTrackingView: React.FC = () => {
   const { token } = useParams<{ token: string }>();
-  const [order, setOrder] = useState<Order | null>(null);
+  const [order, setOrder] = useState<PublicTrackingData | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -155,10 +155,10 @@ export const PublicTrackingView: React.FC = () => {
                 Detail Item Pakaian
               </h3>
               <div className="divide-y divide-slate-100 bg-slate-50 rounded-2xl p-4 text-xs">
-                {order.items?.map((item, i) => (
+                {order.items?.map((item: any, i: number) => (
                   <div key={i} className="py-2 first:pt-0 last:pb-0 flex justify-between">
                     <div>
-                      <p className="font-bold text-slate-900">{item.service_name_snap}</p>
+                      <p className="font-bold text-slate-900">{item.service_name || item.service_name_snap}</p>
                       <p className="text-[11px] text-slate-500">
                         {item.billable_weight} {item.item_type === 'KILOAN' ? 'KG' : 'PCS'}
                       </p>
@@ -187,8 +187,8 @@ export const PublicTrackingView: React.FC = () => {
             <div className="p-4 rounded-2xl border border-slate-200 flex items-center gap-3 text-xs text-slate-600">
               <Store className="w-5 h-5 text-sky-600 shrink-0" />
               <div>
-                <p className="font-bold text-slate-900">{order.branch?.name || 'Outlet Bekasi Timur'}</p>
-                <p className="text-[11px] text-slate-500">{order.branch?.address || 'Bekasi, Jawa Barat'}</p>
+                <p className="font-bold text-slate-900">{order.branch_name || 'Outlet Bekasi Timur'}</p>
+                <p className="text-[11px] text-slate-500">{order.branch_address || 'Bekasi, Jawa Barat'}</p>
               </div>
             </div>
           </div>

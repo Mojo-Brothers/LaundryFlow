@@ -1,5 +1,6 @@
 // ============================================================================
 // Repository & Data Access Layer (Supabase PostgREST & Demo Sandbox Provider)
+// (Phase 1.5 Hardened: Live Data Mutations, State Machine, & Sanitized Tracking)
 // ============================================================================
 
 import {
@@ -13,8 +14,10 @@ import {
   Payment,
   CashierShift,
   OrderStatus,
+  OrderStatusHistory,
 } from '../types/database';
 import { supabase, isLiveSupabaseConfigured } from '../supabase/client';
+import { isValidOrderTransition } from './stateMachine';
 
 // Initial Demo Seed Data
 const DEMO_ORG: Organization = {
@@ -350,6 +353,8 @@ class LocalSandboxStorage {
   services: Service[] = [...DEMO_SERVICES];
   orders: Order[] = [...DEMO_ORDERS];
   shifts: CashierShift[] = [DEMO_SHIFT];
+  statusHistory: OrderStatusHistory[] = [];
+  payments: Payment[] = [];
 
   constructor() {
     this.loadFromStorage();
@@ -365,6 +370,12 @@ class LocalSandboxStorage {
 
       const savedShifts = localStorage.getItem('lf_shifts');
       if (savedShifts) this.shifts = JSON.parse(savedShifts);
+
+      const savedHist = localStorage.getItem('lf_status_history');
+      if (savedHist) this.statusHistory = JSON.parse(savedHist);
+
+      const savedPays = localStorage.getItem('lf_payments');
+      if (savedPays) this.payments = JSON.parse(savedPays);
     } catch {
       // fallback to initial in-memory state
     }
@@ -375,6 +386,8 @@ class LocalSandboxStorage {
       localStorage.setItem('lf_orders', JSON.stringify(this.orders));
       localStorage.setItem('lf_customers', JSON.stringify(this.customers));
       localStorage.setItem('lf_shifts', JSON.stringify(this.shifts));
+      localStorage.setItem('lf_status_history', JSON.stringify(this.statusHistory));
+      localStorage.setItem('lf_payments', JSON.stringify(this.payments));
     } catch {
       // storage quota or incognito
     }
@@ -385,6 +398,8 @@ class LocalSandboxStorage {
     this.services = [...DEMO_SERVICES];
     this.orders = [...DEMO_ORDERS];
     this.shifts = [{ ...DEMO_SHIFT, opened_at: new Date().toISOString() }];
+    this.statusHistory = [];
+    this.payments = [];
     this.save();
   }
 }
@@ -402,10 +417,20 @@ export const repository = {
   },
 
   async getBranches(): Promise<Branch[]> {
+    if (isLiveSupabaseConfigured && supabase) {
+      const { data, error } = await supabase.from('branches').select('*').eq('is_active', true);
+      if (error) throw error;
+      return data as Branch[];
+    }
     return DEMO_BRANCHES;
   },
 
   async getUsers(): Promise<UserProfile[]> {
+    if (isLiveSupabaseConfigured && supabase) {
+      const { data, error } = await supabase.from('users').select('*').eq('is_active', true);
+      if (error) throw error;
+      return data as UserProfile[];
+    }
     return DEMO_USERS;
   },
 
@@ -481,6 +506,16 @@ export const repository = {
   },
 
   async openShift(shift: Omit<CashierShift, 'id' | 'opened_at'>): Promise<CashierShift> {
+    if (isLiveSupabaseConfigured && supabase) {
+      const { data, error } = await supabase
+        .from('cashier_shifts')
+        .insert(shift)
+        .select()
+        .single();
+      if (error) throw error;
+      return data as CashierShift;
+    }
+
     const newShift: CashierShift = {
       ...shift,
       id: 'shift-' + Date.now(),
@@ -492,8 +527,27 @@ export const repository = {
   },
 
   async closeShift(shiftId: string, actualCash: number, notes?: string): Promise<CashierShift> {
+    if (isLiveSupabaseConfigured && supabase) {
+      const { data, error } = await supabase
+        .from('cashier_shifts')
+        .update({
+          actual_cash: actualCash,
+          status: 'CLOSED',
+          closed_at: new Date().toISOString(),
+          notes,
+        })
+        .eq('id', shiftId)
+        .select()
+        .single();
+      if (error) throw error;
+      return data as CashierShift;
+    }
+
     const shift = sandbox.shifts.find(s => s.id === shiftId);
-    if (!shift) throw new Error('Shift not found');
+    if (!shift) throw new Error('Shift tidak ditemukan.');
+    if (shift.status === 'CLOSED') {
+      throw new Error('Shift sudah berstatus CLOSED dan tidak dapat dimodifikasi ulang.');
+    }
 
     shift.actual_cash = actualCash;
     shift.difference = actualCash - shift.expected_cash;
@@ -536,11 +590,73 @@ export const repository = {
     const orderNumber = `BKS-${new Date().toISOString().slice(2, 4)}${new Date().toISOString().slice(5, 7)}-${timestamp}`;
     const trackingToken = `trk_${orderNumber.toLowerCase().replace(/[^a-z0-9]/g, '')}_${Math.random().toString(36).slice(2, 8)}`;
 
+    const paidAmt = paymentData && paymentData.amount > 0 ? paymentData.amount : 0;
+    const finalAmount = Math.max(0, orderData.subtotal - orderData.discount_amount + orderData.delivery_fee);
+    const remainingAmount = Math.max(0, finalAmount - paidAmt);
+    const paymentStatus = paidAmt >= finalAmount ? 'PAID' : paidAmt > 0 ? 'PARTIAL' : 'UNPAID';
+
+    if (isLiveSupabaseConfigured && supabase) {
+      // 1. Insert Order
+      const { data: createdOrder, error: orderErr } = await supabase
+        .from('orders')
+        .insert({
+          ...orderData,
+          order_number: orderNumber,
+          tracking_token: trackingToken,
+          final_amount: finalAmount,
+          paid_amount: paidAmt,
+          remaining_amount: remainingAmount,
+          payment_status: paymentStatus,
+        })
+        .select()
+        .single();
+      if (orderErr) throw orderErr;
+
+      // 2. Insert Order Items
+      const itemsPayload = itemsData.map(item => ({
+        ...item,
+        order_id: createdOrder.id,
+      }));
+      const { error: itemsErr } = await supabase.from('order_items').insert(itemsPayload);
+      if (itemsErr) throw itemsErr;
+
+      // 3. Insert Payment if paid
+      if (paidAmt > 0 && paymentData) {
+        const activeShift = await this.getActiveShift(orderData.branch_id);
+        const { error: payErr } = await supabase.from('payments').insert({
+          organization_id: orderData.organization_id,
+          branch_id: orderData.branch_id,
+          order_id: createdOrder.id,
+          cashier_shift_id: activeShift?.id,
+          payment_method: paymentData.method,
+          amount: paidAmt,
+          received_by: orderData.created_by,
+        });
+        if (payErr) throw payErr;
+      }
+
+      // 4. Insert Initial Status History
+      await supabase.from('order_status_history').insert({
+        order_id: createdOrder.id,
+        from_status: null,
+        to_status: 'RECEIVED',
+        changed_by: orderData.created_by,
+        notes: 'Pesanan diterima kasir',
+      });
+
+      return createdOrder as Order;
+    }
+
+    // Local Sandbox Path
     const newOrder: Order = {
       ...orderData,
       id: 'order-' + Date.now(),
       order_number: orderNumber,
       tracking_token: trackingToken,
+      final_amount: finalAmount,
+      paid_amount: paidAmt,
+      remaining_amount: remainingAmount,
+      payment_status: paymentStatus,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
       items: itemsData.map((item, idx) => ({
@@ -554,37 +670,178 @@ export const repository = {
       production_branch: DEMO_BRANCHES.find(b => b.id === orderData.production_branch_id),
     };
 
-    // Update payment status if paid
-    if (paymentData && paymentData.amount > 0) {
-      newOrder.paid_amount = paymentData.amount;
-      newOrder.remaining_amount = Math.max(0, newOrder.final_amount - paymentData.amount);
-      newOrder.payment_status = newOrder.paid_amount >= newOrder.final_amount ? 'PAID' : 'PARTIAL';
-
-      // Update active shift expected cash
+    // Record payment in sandbox payments
+    if (paidAmt > 0 && paymentData) {
       const activeShift = sandbox.shifts.find(s => s.branch_id === orderData.branch_id && s.status === 'OPEN');
+      const newPayment: Payment = {
+        id: 'pay-' + Date.now(),
+        organization_id: orderData.organization_id,
+        branch_id: orderData.branch_id,
+        order_id: newOrder.id,
+        cashier_shift_id: activeShift?.id,
+        payment_method: paymentData.method,
+        amount: paidAmt,
+        status: 'SUCCESS',
+        received_by: orderData.created_by,
+        created_at: new Date().toISOString(),
+      };
+      sandbox.payments.unshift(newPayment);
+
       if (activeShift && paymentData.method === 'CASH') {
-        activeShift.expected_cash += paymentData.amount;
+        activeShift.expected_cash += paidAmt;
       }
     }
+
+    // Record initial status history in sandbox
+    sandbox.statusHistory.unshift({
+      id: 'hist-' + Date.now(),
+      order_id: newOrder.id,
+      from_status: undefined,
+      to_status: 'RECEIVED',
+      changed_by: orderData.created_by,
+      notes: 'Pesanan diterima di kasir',
+      created_at: new Date().toISOString(),
+    });
 
     sandbox.orders.unshift(newOrder);
     sandbox.save();
     return newOrder;
   },
 
-  async updateOrderStatus(orderId: string, nextStatus: OrderStatus, _userId: string, _notes?: string): Promise<Order> {
-    const order = sandbox.orders.find(o => o.id === orderId);
-    if (!order) throw new Error('Order not found');
+  async updateOrderStatus(
+    orderId: string,
+    nextStatus: OrderStatus,
+    userId: string,
+    notes?: string
+  ): Promise<Order> {
+    let order: Order | undefined;
 
+    if (isLiveSupabaseConfigured && supabase) {
+      const { data: currentOrder, error: fetchErr } = await supabase
+        .from('orders')
+        .select('*')
+        .eq('id', orderId)
+        .single();
+      if (fetchErr || !currentOrder) throw new Error('Order tidak ditemukan');
+
+      // 1. Strict State Machine Validation
+      const validation = isValidOrderTransition(
+        currentOrder.status,
+        nextStatus,
+        currentOrder.operating_mode
+      );
+      if (!validation.isValid) {
+        throw new Error(validation.reason);
+      }
+
+      // 2. Update Order
+      const { data: updated, error: updateErr } = await supabase
+        .from('orders')
+        .update({ status: nextStatus, updated_at: new Date().toISOString() })
+        .eq('id', orderId)
+        .select()
+        .single();
+      if (updateErr) throw updateErr;
+
+      // 3. Record Immutable Status History
+      await supabase.from('order_status_history').insert({
+        order_id: orderId,
+        from_status: currentOrder.status,
+        to_status: nextStatus,
+        changed_by: userId,
+        notes: notes || `Status diubah menjadi ${nextStatus}`,
+      });
+
+      return updated as Order;
+    }
+
+    // Local Sandbox Path
+    order = sandbox.orders.find(o => o.id === orderId);
+    if (!order) throw new Error('Order tidak ditemukan');
+
+    // 1. Strict State Machine Validation
+    const validation = isValidOrderTransition(order.status, nextStatus, order.operating_mode);
+    if (!validation.isValid) {
+      throw new Error(validation.reason);
+    }
+
+    const previousStatus = order.status;
     order.status = nextStatus;
     order.updated_at = new Date().toISOString();
+
+    // 2. Record Status History in Sandbox
+    sandbox.statusHistory.unshift({
+      id: 'hist-' + Date.now(),
+      order_id: order.id,
+      from_status: previousStatus,
+      to_status: nextStatus,
+      changed_by: userId,
+      notes: notes || `Status diubah dari ${previousStatus} menjadi ${nextStatus}`,
+      created_at: new Date().toISOString(),
+    });
+
     sandbox.save();
     return order;
   },
 
-  async getOrderByTrackingToken(token: string): Promise<Order | null> {
+  /**
+   * Public tracking fetcher: strictly queries non-PII tracking view/RPC
+   */
+  async getOrderByTrackingToken(token: string): Promise<any | null> {
+    if (!token || token.trim().length < 5) return null;
+
+    if (isLiveSupabaseConfigured && supabase) {
+      const { data, error } = await supabase.rpc('get_public_order_tracking', {
+        p_tracking_token: token,
+      });
+      if (error) {
+        console.error('Error fetching public tracking RPC:', error);
+        return null;
+      }
+      return data;
+    }
+
+    // Local Sandbox RPC Simulation: Sanitized object with ZERO PII
     const order = sandbox.orders.find(o => o.tracking_token === token);
-    return order || null;
+    if (!order) return null;
+
+    return {
+      order_number: order.order_number,
+      status: order.status,
+      operating_mode: order.operating_mode,
+      subtotal: order.subtotal,
+      discount_amount: order.discount_amount,
+      delivery_fee: order.delivery_fee,
+      final_amount: order.final_amount,
+      paid_amount: order.paid_amount,
+      remaining_amount: order.remaining_amount,
+      payment_status: order.payment_status,
+      promised_ready_at: order.promised_ready_at,
+      created_at: order.created_at,
+      branch_name: order.branch?.name || 'Outlet Bekasi Timur',
+      branch_address: order.branch?.address || 'Bekasi, Jawa Barat',
+      branch_phone: order.branch?.phone || '0812-9988-7711',
+      items: order.items?.map(i => ({
+        service_name: i.service_name_snap,
+        quantity_or_weight: i.quantity_or_weight,
+        billable_weight: i.billable_weight,
+        item_type: i.item_type,
+        subtotal: i.subtotal,
+      })) || [],
+    };
+  },
+
+  async getOrderStatusHistory(orderId: string): Promise<OrderStatusHistory[]> {
+    if (isLiveSupabaseConfigured && supabase) {
+      const { data, error } = await supabase
+        .from('order_status_history')
+        .select('*')
+        .eq('order_id', orderId)
+        .order('created_at', { ascending: false });
+      if (error) throw error;
+      return data as OrderStatusHistory[];
+    }
+    return sandbox.statusHistory.filter(h => h.order_id === orderId);
   },
 
   resetSandbox() {

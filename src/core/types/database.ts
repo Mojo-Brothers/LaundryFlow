@@ -149,6 +149,31 @@ export interface Order {
   payments?: Payment[];
 }
 
+export interface PublicTrackingData {
+  order_number: string;
+  status: OrderStatus;
+  operating_mode: OperatingMode;
+  subtotal: number;
+  discount_amount: number;
+  delivery_fee: number;
+  final_amount: number;
+  paid_amount: number;
+  remaining_amount: number;
+  payment_status: PaymentStatus;
+  promised_ready_at: string;
+  created_at: string;
+  branch_name: string;
+  branch_address?: string;
+  branch_phone?: string;
+  items: Array<{
+    service_name: string;
+    quantity_or_weight: number;
+    billable_weight: number;
+    item_type: string;
+    subtotal: number;
+  }>;
+}
+
 export interface Payment {
   id: string;
   organization_id: string;
