@@ -15,10 +15,13 @@ import {
 export const ProductionKanbanView: React.FC = () => {
   const { currentBranch, currentUser } = usePosStore();
   const [orders, setOrders] = useState<Order[]>([]);
+  const [damagedOrders, setDamagedOrders] = useState<Order[]>([]);
 
   const loadProductionOrders = async () => {
-    const list = await repository.getOrders();
-    setOrders(list);
+    if (!currentBranch?.id) return;
+    const { washQueue, damagedQueue } = await repository.getWorkshopOrders(currentBranch.id);
+    setOrders(washQueue);
+    setDamagedOrders(damagedQueue);
   };
 
   useEffect(() => {
@@ -51,10 +54,35 @@ export const ProductionKanbanView: React.FC = () => {
             </span>
           </div>
           <p className="text-xs text-slate-500 mt-0.5">
-            Lacak pergerakan cucian per tahapan mesin cuci, pengering, setrika, hingga QC akhir
+            Lacak pergerakan cucian per tahapan mesin cuci, pengering, setrika, hingga QC akhir (Physical Custody Confirmed)
           </p>
         </div>
       </div>
+
+      {/* Exception Panel: DAMAGED Orders (Excluded from normal wash queue, available for inspection/return) */}
+      {damagedOrders.length > 0 && (
+        <div className="p-4 rounded-2xl bg-amber-50 border border-amber-200 space-y-2">
+          <div className="flex items-center gap-2 text-amber-900 font-bold text-xs">
+            <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+            <span>Panel Inspeksi &amp; Discrepancy (Barang Rusak / DAMAGED): {damagedOrders.length} Order</span>
+          </div>
+          <p className="text-[11px] text-amber-700">
+            Order berikut diterima dalam kondisi rusak/defect di workshop. Dikeluarkan dari antrean cuci normal dan siap dikembalikan ke outlet asal via Return Transit.
+          </p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 pt-1">
+            {damagedOrders.map((dOrder) => (
+              <div key={dOrder.id} className="p-2.5 bg-white rounded-xl border border-amber-200 shadow-2xs text-xs space-y-1">
+                <div className="flex justify-between items-center font-mono font-bold text-slate-800 text-[11px]">
+                  <span>{dOrder.order_number}</span>
+                  <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 font-bold">DAMAGED</span>
+                </div>
+                <p className="text-[11px] font-semibold text-slate-700 truncate">{dOrder.customer?.name}</p>
+                <p className="text-[10px] text-slate-500">Asal: {dOrder.branch?.name || 'Outlet'}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Kanban Columns */}
       <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-5 gap-4 overflow-x-auto pb-4">

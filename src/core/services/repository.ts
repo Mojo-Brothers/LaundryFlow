@@ -20,6 +20,9 @@ import {
   TransitManifestHistory,
   TransitManifestStatus,
   TransitManifestItemStatus,
+  OrderReworkRequest,
+  ReworkRequestStatus,
+  ReworkReasonCode,
 } from '../types/database';
 import { supabase, isLiveSupabaseConfigured } from '../supabase/client';
 import { isValidOrderTransition } from './stateMachine';
@@ -30,7 +33,28 @@ import {
   validateManifestDraft,
   calculateManifestDiscrepancy,
   isOrderEligibleForTransit,
+  assertOrderEligibleForManifest,
+  assertManifestMutable,
+  assertManifestItemMutable,
+  assertManifestCanRemoveItem,
+  assertManifestRouteMutable,
+  assertManifestDeletable,
+  isOutboundTransitEligible,
+  isReturnTransitEligible,
+  determineTransitRouteDirection,
+  getLatestCompletedOutbound,
+  getLatestCompletedReturn,
+  getLatestOutboundItem,
+  deriveOrderCustodyState,
+  OrderCustodyState,
+  HistoricalTransitItem,
 } from './transitStateMachine';
+
+export interface CreateOrderReworkRequestDTO {
+  order_id: string;
+  reason: ReworkReasonCode;
+  notes?: string | null;
+}
 import {
   calculateShiftReconciliation,
   ShiftReconciliationResult,
@@ -90,13 +114,27 @@ export function normalizeRepositoryError(err: unknown): RepositoryError {
     lower.includes('illegal') ||
     lower.includes('cannot transition') ||
     lower.includes('cannot modify') ||
+    lower.includes('cannot be deleted') ||
+    lower.includes('cannot delete') ||
+    lower.includes('while items are attached') ||
     lower.includes('already received') ||
     lower.includes('is cancelled') ||
-    lower.includes('must be in_transit')
+    lower.includes('must be in_transit') ||
+    lower.includes('strictly immutable')
   ) {
     return new RepositoryError('INVALID_STATE_TRANSITION', message, err);
   }
   if (
+    lower.includes('cross-tenant') ||
+    lower.includes('access denied') ||
+    lower.includes('unauthorized') ||
+    lower.includes('permission') ||
+    lower.includes('forbidden')
+  ) {
+    return new RepositoryError('FORBIDDEN', message, err);
+  }
+  if (
+    lower.includes('cross-branch') ||
     lower.includes('tidak eligible') ||
     lower.includes('not eligible') ||
     lower.includes('different') ||
@@ -105,14 +143,6 @@ export function normalizeRepositoryError(err: unknown): RepositoryError {
     lower.includes('wajib')
   ) {
     return new RepositoryError('VALIDATION_ERROR', message, err);
-  }
-  if (
-    lower.includes('access denied') ||
-    lower.includes('unauthorized') ||
-    lower.includes('permission') ||
-    lower.includes('forbidden')
-  ) {
-    return new RepositoryError('FORBIDDEN', message, err);
   }
   if (lower.includes('not found') || lower.includes('tidak ditemukan')) {
     return new RepositoryError('NOT_FOUND', message, err);
@@ -673,9 +703,27 @@ class LocalSandboxStorage {
   manifests: TransitManifest[] = [...DEMO_MANIFESTS];
   manifestItems: TransitManifestItem[] = [...DEMO_MANIFEST_ITEMS];
   manifestHistory: TransitManifestHistory[] = [...DEMO_MANIFEST_HISTORY];
+  orderReworkRequests: OrderReworkRequest[] = [];
 
   constructor() {
     this.loadFromStorage();
+  }
+
+  getHistoricalTransitItems(): HistoricalTransitItem[] {
+    return this.manifestItems.map(item => {
+      const m = this.manifests.find(man => man.id === item.manifest_id);
+      return {
+        order_id: item.order_id,
+        received_status: item.received_status,
+        received_at: item.received_at,
+        manifest: {
+          source_branch_id: m?.source_branch_id || '',
+          destination_branch_id: m?.destination_branch_id || '',
+          status: m?.status || 'DRAFT',
+          received_at: m?.received_at,
+        },
+      };
+    });
   }
 
   private loadFromStorage() {
@@ -703,6 +751,9 @@ class LocalSandboxStorage {
 
       const savedMHist = localStorage.getItem('lf_manifest_history');
       if (savedMHist) this.manifestHistory = JSON.parse(savedMHist);
+
+      const savedRework = localStorage.getItem('lf_order_rework_requests');
+      if (savedRework) this.orderReworkRequests = JSON.parse(savedRework);
     } catch {
       // fallback to initial in-memory state
     }
@@ -718,6 +769,7 @@ class LocalSandboxStorage {
       localStorage.setItem('lf_manifests', JSON.stringify(this.manifests));
       localStorage.setItem('lf_manifest_items', JSON.stringify(this.manifestItems));
       localStorage.setItem('lf_manifest_history', JSON.stringify(this.manifestHistory));
+      localStorage.setItem('lf_order_rework_requests', JSON.stringify(this.orderReworkRequests));
     } catch {
       // storage quota or incognito
     }
@@ -733,6 +785,7 @@ class LocalSandboxStorage {
     this.manifests = [...DEMO_MANIFESTS];
     this.manifestItems = [...DEMO_MANIFEST_ITEMS];
     this.manifestHistory = [...DEMO_MANIFEST_HISTORY];
+    this.orderReworkRequests = [];
     this.save();
   }
 }
@@ -1017,7 +1070,11 @@ export const repository = {
   },
 
   // --- Orders ---
-  async getOrders(branchId?: string, status?: OrderStatus): Promise<Order[]> {
+  async getOrders(
+    branchId?: string,
+    status?: OrderStatus,
+    options?: { productionBranchId?: string }
+  ): Promise<Order[]> {
     if (isLiveSupabaseConfigured && supabase) {
       let query = supabase
         .from('orders')
@@ -1025,6 +1082,7 @@ export const repository = {
         .order('created_at', { ascending: false });
 
       if (branchId) query = query.eq('branch_id', branchId);
+      if (options?.productionBranchId) query = query.eq('production_branch_id', options.productionBranchId);
       if (status) query = query.eq('status', status);
 
       const { data, error } = await query;
@@ -1034,6 +1092,18 @@ export const repository = {
 
     let list = [...sandbox.orders];
     if (branchId) list = list.filter(o => o.branch_id === branchId || o.production_branch_id === branchId);
+    if (options?.productionBranchId) {
+      const prodBranchId = options.productionBranchId;
+      const history = sandbox.getHistoricalTransitItems();
+      list = list.filter(o => {
+        if (o.production_branch_id !== prodBranchId) return false;
+        // Local order: originating branch is the workshop itself -> visible directly
+        if (o.branch_id === prodBranchId) return true;
+        // External order: only visible if physically present at workshop with RECEIVED_OK
+        const custodyState = deriveOrderCustodyState(o, history);
+        return custodyState === 'AT_WORKSHOP';
+      });
+    }
     if (status) list = list.filter(o => o.status === status);
     return list;
   },
@@ -1241,6 +1311,18 @@ export const repository = {
     return order;
   },
 
+  async getPayments(orderId: string): Promise<Payment[]> {
+    if (isLiveSupabaseConfigured && supabase) {
+      const { data, error } = await supabase
+        .from('payments')
+        .select('*')
+        .eq('order_id', orderId);
+      if (error) throw normalizeRepositoryError(error);
+      return (data || []) as Payment[];
+    }
+    return sandbox.payments.filter(p => p.order_id === orderId);
+  },
+
   /**
    * Public tracking fetcher: strictly queries non-PII tracking view/RPC
    */
@@ -1345,6 +1427,7 @@ export const repository = {
     }
 
     // Sandbox Path: Double-dispatch prevention across active manifests
+    const orgId = input.organizationId || DEMO_ORG.id;
     const activeStatuses: TransitManifestStatus[] = ['DRAFT', 'READY_TO_DISPATCH', 'IN_TRANSIT'];
     const activeManifestIds = new Set(
       sandbox.manifests.filter(m => activeStatuses.includes(m.status)).map(m => m.id)
@@ -1367,11 +1450,34 @@ export const repository = {
         if (!order) {
           throw new RepositoryError('VALIDATION_ERROR', `Order ${orderId} tidak ditemukan.`);
         }
-        if (order.branch_id !== input.sourceBranchId) {
+        if (order.organization_id && order.organization_id !== orgId) {
           throw new RepositoryError(
-            'VALIDATION_ERROR',
-            `Order ${order.order_number} tidak berada di cabang asal ${input.sourceBranchId}.`
+            'FORBIDDEN',
+            `Cross-tenant violation: Order ${order.order_number || order.id} belongs to a different organization.`
           );
+        }
+        const hasApprovedRework = sandbox.orderReworkRequests.some(
+          r => r.order_id === orderId && r.status === 'APPROVED'
+        );
+        const history: HistoricalTransitItem[] = sandbox.getHistoricalTransitItems();
+
+        try {
+          assertOrderEligibleForManifest(
+            {
+              organization_id: orgId,
+              source_branch_id: input.sourceBranchId,
+              destination_branch_id: input.destinationBranchId,
+              status: 'DRAFT',
+            },
+            order,
+            history,
+            hasApprovedRework
+          );
+        } catch (err: any) {
+          if (err.message && err.message.includes('Cross-tenant')) {
+            throw new RepositoryError('FORBIDDEN', err.message);
+          }
+          throw new RepositoryError('VALIDATION_ERROR', err.message);
         }
       }
     }
@@ -1383,7 +1489,6 @@ export const repository = {
     const now = new Date().toISOString();
     const manifestId = 'man-' + Date.now();
     const orderCount = input.orderIds ? input.orderIds.length : 0;
-    const orgId = input.organizationId || DEMO_ORG.id;
 
     const newManifest: TransitManifest = {
       id: manifestId,
@@ -1415,6 +1520,31 @@ export const repository = {
           received_status: 'EXPECTED',
           added_at: now,
         });
+
+        // Atomic Rework Token Consumption for Cycle 2+ Outbound
+        const order = sandbox.orders.find(o => o.id === orderId);
+        if (order) {
+          const direction = determineTransitRouteDirection({
+            order,
+            sourceBranchId: input.sourceBranchId,
+            destinationBranchId: input.destinationBranchId,
+          });
+          if (direction === 'OUTBOUND') {
+            const effectiveProd = order.production_branch_id || input.destinationBranchId;
+            const history = sandbox.getHistoricalTransitItems();
+            const latestOutbound = getLatestCompletedOutbound(order.id, history, order.branch_id, effectiveProd);
+            if (latestOutbound) {
+              const rework = sandbox.orderReworkRequests.find(
+                r => r.order_id === order.id && r.status === 'APPROVED'
+              );
+              if (rework) {
+                rework.status = 'CONSUMED';
+                rework.consumed_manifest_id = manifestId;
+                rework.consumed_at = now;
+              }
+            }
+          }
+        }
       }
     }
 
@@ -1806,20 +1936,60 @@ export const repository = {
 
       const activeOrderIds = new Set((activeItems || []).map((i: any) => i.order_id));
 
+      // Fetch non-terminal candidate orders (either branch_id = sourceBranchId OR production_branch_id = sourceBranchId)
       let query = supabase
         .from('orders')
         .select('*, customer:customers(*), items:order_items(*)')
-        .eq('branch_id', sourceBranchId)
         .not('status', 'in', '("COMPLETED","CANCELLED")');
 
       if (destinationBranchId) {
-        query = query.eq('production_branch_id', destinationBranchId);
+        query = query.or(
+          `and(branch_id.eq.${sourceBranchId},production_branch_id.eq.${destinationBranchId}),and(production_branch_id.eq.${sourceBranchId},branch_id.eq.${destinationBranchId})`
+        );
+      } else {
+        query = query.or(
+          `branch_id.eq.${sourceBranchId},production_branch_id.eq.${sourceBranchId}`
+        );
       }
 
       const { data: orders, error: ordersErr } = await query;
       if (ordersErr) throw normalizeRepositoryError(ordersErr);
 
-      return ((orders || []) as Order[]).filter(o => !activeOrderIds.has(o.id));
+      // Fetch history items to evaluate re-eligibility and prior outbound receipt
+      const { data: rawHistory, error: histErr } = await supabase
+        .from('transit_manifest_items')
+        .select('order_id, received_status, received_at, manifest:transit_manifests!inner(source_branch_id, destination_branch_id, status, received_at)');
+      if (histErr) throw normalizeRepositoryError(histErr);
+
+      const history: HistoricalTransitItem[] = (rawHistory || []).map((h: any) => ({
+        order_id: h.order_id,
+        received_status: h.received_status,
+        received_at: h.received_at,
+        manifest: {
+          source_branch_id: h.manifest.source_branch_id,
+          destination_branch_id: h.manifest.destination_branch_id,
+          status: h.manifest.status,
+          received_at: h.manifest.received_at,
+        },
+      }));
+
+      return ((orders || []) as Order[]).filter((order) => {
+        if (activeOrderIds.has(order.id)) return false;
+
+        // Outbound candidate (Origin Outlet -> Workshop)
+        if (order.branch_id === sourceBranchId) {
+          const dest = destinationBranchId || order.production_branch_id;
+          return isOutboundTransitEligible(order, sourceBranchId, dest, history);
+        }
+
+        // Return candidate (Workshop -> Origin Outlet)
+        if (order.production_branch_id === sourceBranchId) {
+          const dest = destinationBranchId || order.branch_id;
+          return isReturnTransitEligible(order, sourceBranchId, dest, history);
+        }
+
+        return false;
+      });
     }
 
     const activeStatuses: TransitManifestStatus[] = ['DRAFT', 'READY_TO_DISPATCH', 'IN_TRANSIT'];
@@ -1830,15 +2000,521 @@ export const repository = {
       sandbox.manifestItems.filter(i => activeManifestIds.has(i.manifest_id)).map(i => i.order_id)
     );
 
+    const history: HistoricalTransitItem[] = sandbox.manifestItems.map(item => {
+      const m = sandbox.manifests.find(man => man.id === item.manifest_id);
+      return {
+        order_id: item.order_id,
+        received_status: item.received_status,
+        received_at: item.received_at,
+        manifest: {
+          source_branch_id: m?.source_branch_id || '',
+          destination_branch_id: m?.destination_branch_id || '',
+          status: m?.status || 'DRAFT',
+          received_at: m?.received_at,
+        },
+      };
+    });
+
     return sandbox.orders.filter(order => {
-      if (order.branch_id !== sourceBranchId) return false;
       if (activeOrderIds.has(order.id)) return false;
       if (order.status === 'COMPLETED' || order.status === 'CANCELLED') return false;
-      if (destinationBranchId && order.production_branch_id !== destinationBranchId && order.branch_id !== destinationBranchId) {
-        return false;
+
+      // Outbound candidate (Origin Outlet -> Workshop)
+      if (order.branch_id === sourceBranchId) {
+        const dest = destinationBranchId || order.production_branch_id;
+        return isOutboundTransitEligible(order, sourceBranchId, dest, history);
       }
-      return true;
+
+      // Return candidate (Workshop -> Origin Outlet)
+      if (order.production_branch_id === sourceBranchId) {
+        const dest = destinationBranchId || order.branch_id;
+        return isReturnTransitEligible(order, sourceBranchId, dest, history);
+      }
+
+      return false;
     });
+  },
+
+  async updateTransitManifest(
+    id: string,
+    updates: Partial<Pick<TransitManifest, 'driver_user_id' | 'vehicle_identifier' | 'notes' | 'source_branch_id' | 'destination_branch_id'>>
+  ): Promise<TransitManifest> {
+    if (isLiveSupabaseConfigured && supabase) {
+      const { data, error } = await supabase
+        .from('transit_manifests')
+        .update(updates)
+        .eq('id', id)
+        .select('*')
+        .single();
+      if (error) throw normalizeRepositoryError(error);
+      return data as TransitManifest;
+    }
+
+    const manifest = sandbox.manifests.find(m => m.id === id);
+    if (!manifest) throw new RepositoryError('NOT_FOUND', `Manifest ${id} tidak ditemukan.`);
+
+    if (manifest.status === 'RECEIVED') {
+      throw new RepositoryError(
+        'INVALID_STATE_TRANSITION',
+        `Illegal operation: Manifest ${id} is already RECEIVED and is strictly immutable.`
+      );
+    }
+    if (manifest.status === 'CANCELLED') {
+      throw new RepositoryError(
+        'INVALID_STATE_TRANSITION',
+        `Illegal operation: Manifest ${id} is CANCELLED and is strictly immutable.`
+      );
+    }
+
+    if (manifest.status === 'IN_TRANSIT') {
+      if (
+        (updates.source_branch_id && updates.source_branch_id !== manifest.source_branch_id) ||
+        (updates.destination_branch_id && updates.destination_branch_id !== manifest.destination_branch_id)
+      ) {
+        throw new RepositoryError(
+          'INVALID_STATE_TRANSITION',
+          `Cannot alter source or destination branch of manifest ${id} while IN_TRANSIT.`
+        );
+      }
+    }
+
+    const itemsCount = sandbox.manifestItems.filter(i => i.manifest_id === id).length;
+    if (updates.source_branch_id && updates.source_branch_id !== manifest.source_branch_id) {
+      if (itemsCount > 0) {
+        throw new RepositoryError(
+          'INVALID_STATE_TRANSITION',
+          `Cannot modify source_branch_id of manifest ${id} while items are attached. Remove all items before changing source branch.`
+        );
+      }
+    }
+
+    Object.assign(manifest, updates, { updated_at: new Date().toISOString() });
+    sandbox.save();
+    return (await this.getTransitManifest(id))!;
+  },
+
+  async updateTransitManifestItem(
+    manifestId: string,
+    orderId: string,
+    updates: { received_status?: TransitManifestItemStatus; discrepancy_notes?: string }
+  ): Promise<TransitManifestItem> {
+    if (isLiveSupabaseConfigured && supabase) {
+      const { data, error } = await supabase
+        .from('transit_manifest_items')
+        .update(updates)
+        .eq('manifest_id', manifestId)
+        .eq('order_id', orderId)
+        .select('*')
+        .single();
+      if (error) throw normalizeRepositoryError(error);
+      return data as TransitManifestItem;
+    }
+
+    const manifest = sandbox.manifests.find(m => m.id === manifestId);
+    if (!manifest) throw new RepositoryError('NOT_FOUND', `Manifest ${manifestId} tidak ditemukan.`);
+
+    if (manifest.status === 'RECEIVED') {
+      throw new RepositoryError(
+        'INVALID_STATE_TRANSITION',
+        `Illegal operation: Parent manifest ${manifestId} is already RECEIVED. Manifest items are strictly immutable.`
+      );
+    }
+    if (manifest.status === 'CANCELLED') {
+      throw new RepositoryError(
+        'INVALID_STATE_TRANSITION',
+        `Illegal operation: Parent manifest ${manifestId} is CANCELLED. Manifest items cannot be modified.`
+      );
+    }
+
+    const item = sandbox.manifestItems.find(i => i.manifest_id === manifestId && i.order_id === orderId);
+    if (!item) throw new RepositoryError('NOT_FOUND', `Item dengan order ${orderId} pada manifest ${manifestId} tidak ditemukan.`);
+
+    if (updates.received_status) item.received_status = updates.received_status;
+    if (updates.discrepancy_notes !== undefined) item.discrepancy_notes = updates.discrepancy_notes;
+    sandbox.save();
+    return item;
+  },
+
+  async addTransitManifestItem(manifestId: string, orderId: string): Promise<TransitManifestItem> {
+    if (isLiveSupabaseConfigured && supabase) {
+      const manifest = await this.getTransitManifest(manifestId);
+      if (!manifest) throw new RepositoryError('NOT_FOUND', `Manifest ${manifestId} tidak ditemukan.`);
+
+      const { data, error } = await supabase
+        .from('transit_manifest_items')
+        .insert({
+          manifest_id: manifestId,
+          organization_id: manifest.organization_id,
+          order_id: orderId,
+          received_status: 'EXPECTED',
+        })
+        .select('*')
+        .single();
+      if (error) throw normalizeRepositoryError(error);
+      return data as TransitManifestItem;
+    }
+
+    const manifest = sandbox.manifests.find(m => m.id === manifestId);
+    if (!manifest) throw new RepositoryError('NOT_FOUND', `Manifest ${manifestId} tidak ditemukan.`);
+
+    if (manifest.status !== 'DRAFT' && manifest.status !== 'READY_TO_DISPATCH') {
+      throw new RepositoryError(
+        'INVALID_STATE_TRANSITION',
+        `Cannot attach order to manifest ${manifestId} with status ${manifest.status}. Orders can only be attached to DRAFT or READY_TO_DISPATCH manifests.`
+      );
+    }
+
+    const order = sandbox.orders.find(o => o.id === orderId);
+    if (!order) throw new RepositoryError('VALIDATION_ERROR', `Order ${orderId} tidak ditemukan.`);
+
+    const history: HistoricalTransitItem[] = sandbox.getHistoricalTransitItems();
+    const hasApprovedRework = sandbox.orderReworkRequests.some(
+      r => r.order_id === orderId && r.status === 'APPROVED'
+    );
+
+    try {
+      assertOrderEligibleForManifest(manifest, order, history, hasApprovedRework);
+    } catch (err: any) {
+      if (err.message && err.message.includes('Cross-tenant')) {
+        throw new RepositoryError('FORBIDDEN', err.message);
+      }
+      throw new RepositoryError('VALIDATION_ERROR', err.message);
+    }
+
+    // Atomic Rework Token Consumption for Cycle 2+ Outbound
+    if (manifest.destination_branch_id) {
+      const direction = determineTransitRouteDirection({
+        order,
+        sourceBranchId: manifest.source_branch_id,
+        destinationBranchId: manifest.destination_branch_id,
+      });
+      if (direction === 'OUTBOUND') {
+        const effectiveProd = order.production_branch_id || manifest.destination_branch_id;
+        const latestOutbound = getLatestCompletedOutbound(order.id, history, order.branch_id, effectiveProd);
+        if (latestOutbound) {
+          const rework = sandbox.orderReworkRequests.find(
+            r => r.order_id === order.id && r.status === 'APPROVED'
+          );
+          if (rework) {
+            rework.status = 'CONSUMED';
+            rework.consumed_manifest_id = manifestId;
+            rework.consumed_at = new Date().toISOString();
+          }
+        }
+      }
+    }
+
+    const newItem: TransitManifestItem = {
+      id: 'mitem-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7),
+      manifest_id: manifestId,
+      organization_id: manifest.organization_id,
+      order_id: orderId,
+      received_status: 'EXPECTED',
+      added_at: new Date().toISOString(),
+    };
+    sandbox.manifestItems.push(newItem);
+    manifest.total_expected_orders = (manifest.total_expected_orders || 0) + 1;
+    sandbox.save();
+    return newItem;
+  },
+
+  async removeTransitManifestItem(manifestId: string, orderId: string): Promise<void> {
+    if (isLiveSupabaseConfigured && supabase) {
+      const { error } = await supabase
+        .from('transit_manifest_items')
+        .delete()
+        .eq('manifest_id', manifestId)
+        .eq('order_id', orderId);
+      if (error) throw normalizeRepositoryError(error);
+      return;
+    }
+
+    const manifest = sandbox.manifests.find(m => m.id === manifestId);
+    if (!manifest) throw new RepositoryError('NOT_FOUND', `Manifest ${manifestId} tidak ditemukan.`);
+
+    if (manifest.status !== 'DRAFT') {
+      throw new RepositoryError(
+        'INVALID_STATE_TRANSITION',
+        `Cannot delete item from manifest ${manifestId} with status ${manifest.status}. Items can only be removed while in DRAFT.`
+      );
+    }
+
+    const idx = sandbox.manifestItems.findIndex(i => i.manifest_id === manifestId && i.order_id === orderId);
+    if (idx !== -1) {
+      sandbox.manifestItems.splice(idx, 1);
+      manifest.total_expected_orders = Math.max(0, (manifest.total_expected_orders || 1) - 1);
+      sandbox.save();
+    }
+  },
+
+  async deleteTransitManifest(id: string): Promise<void> {
+    if (isLiveSupabaseConfigured && supabase) {
+      const { error } = await supabase
+        .from('transit_manifests')
+        .delete()
+        .eq('id', id);
+      if (error) throw normalizeRepositoryError(error);
+      return;
+    }
+
+    const manifest = sandbox.manifests.find(m => m.id === id);
+    if (!manifest) throw new RepositoryError('NOT_FOUND', `Manifest ${id} tidak ditemukan.`);
+
+    if (manifest.status === 'RECEIVED') {
+      throw new RepositoryError(
+        'INVALID_STATE_TRANSITION',
+        `Illegal operation: Manifest ${id} is already RECEIVED and cannot be deleted.`
+      );
+    }
+    if (manifest.status === 'CANCELLED') {
+      throw new RepositoryError(
+        'INVALID_STATE_TRANSITION',
+        `Illegal operation: Manifest ${id} is CANCELLED and cannot be deleted.`
+      );
+    }
+    if (manifest.status === 'IN_TRANSIT' || manifest.status === 'READY_TO_DISPATCH') {
+      throw new RepositoryError(
+        'INVALID_STATE_TRANSITION',
+        `Illegal operation: Manifest ${id} is in active status ${manifest.status} and cannot be deleted.`
+      );
+    }
+
+    throw new RepositoryError(
+      'INVALID_STATE_TRANSITION',
+      `Illegal operation: Manifest ${id} is in DRAFT status and cannot be deleted. Cancel manifest to preserve audit trail.`
+    );
+  },
+
+  // --- Order Rework Requests (Phase 4B Multi-Cycle Rework Gate) ---
+
+  async createOrderReworkRequest(
+    dto: CreateOrderReworkRequestDTO,
+    actorId?: string
+  ): Promise<OrderReworkRequest> {
+    if (isLiveSupabaseConfigured && supabase) {
+      const { data, error } = await supabase.rpc('create_order_rework_request', {
+        p_order_id: dto.order_id,
+        p_reason: dto.reason,
+        p_notes: dto.notes || null,
+      });
+      if (error) throw normalizeRepositoryError(error);
+
+      const { data: reqData, error: reqErr } = await supabase
+        .from('order_rework_requests')
+        .select('*, order:orders(*), requested_by_user:users(*)')
+        .eq('id', data.rework_request_id)
+        .single();
+      if (reqErr) throw normalizeRepositoryError(reqErr);
+      return reqData as OrderReworkRequest;
+    }
+
+    const effectiveActorId = actorId || DEMO_USERS[1].id;
+    const actor = DEMO_USERS.find(u => u.id === effectiveActorId) || DEMO_USERS[1];
+
+    // RBAC: Allowed: OWNER, ADMIN, MANAGER, BRANCH_MANAGER, CASHIER. Forbid: OPERATOR, DRIVER, VIEWER.
+    const allowedRoles: string[] = ['OWNER', 'ADMIN', 'MANAGER', 'BRANCH_MANAGER', 'CASHIER'];
+    if (!allowedRoles.includes(actor.role)) {
+      throw new RepositoryError(
+        'FORBIDDEN',
+        `Access denied: User role '${actor.role}' is not authorized to request rework.`
+      );
+    }
+
+    const order = sandbox.orders.find(o => o.id === dto.order_id);
+    if (!order) {
+      throw new RepositoryError('NOT_FOUND', `Order ${dto.order_id} tidak ditemukan.`);
+    }
+
+    if (actor.organization_id && order.organization_id !== actor.organization_id) {
+      throw new RepositoryError(
+        'FORBIDDEN',
+        'Cross-tenant violation: Order belongs to another organization.'
+      );
+    }
+
+    // Branch access check: Actor must have access to origin outlet
+    if (
+      actor.role !== 'OWNER' &&
+      actor.role !== 'ADMIN' &&
+      actor.default_branch_id &&
+      actor.default_branch_id !== order.branch_id
+    ) {
+      throw new RepositoryError(
+        'FORBIDDEN',
+        'Access denied: User does not have branch access to order origin branch.'
+      );
+    }
+
+    // Order Lifecycle: Non-terminal
+    if (order.status === 'CANCELLED' || order.status === 'COMPLETED') {
+      throw new RepositoryError(
+        'VALIDATION_ERROR',
+        `Order dengan status '${order.status}' tidak dapat diajukan rework.`
+      );
+    }
+
+    // Active Manifest check
+    const activeManifestIds = new Set(
+      sandbox.manifests
+        .filter(m => ['DRAFT', 'READY_TO_DISPATCH', 'IN_TRANSIT'].includes(m.status))
+        .map(m => m.id)
+    );
+    const inActiveManifest = sandbox.manifestItems.some(
+      item => item.order_id === order.id && activeManifestIds.has(item.manifest_id)
+    );
+    if (inActiveManifest) {
+      throw new RepositoryError(
+        'CONFLICT',
+        `Order ${order.order_number || order.id} sedang berada dalam manifest aktif dan tidak dapat diajukan rework.`
+      );
+    }
+
+    // Physical Custody Check: Order must be physically at origin outlet
+    const history = sandbox.getHistoricalTransitItems();
+    const effectiveProd = order.production_branch_id || '';
+    const latestOutbound = getLatestCompletedOutbound(order.id, history, order.branch_id, effectiveProd);
+    if (latestOutbound) {
+      const latestReturn = getLatestCompletedReturn(order.id, history, order.branch_id, effectiveProd);
+      const outTime = latestOutbound.manifest.received_at || latestOutbound.received_at || '';
+      const retTime = latestReturn ? (latestReturn.manifest.received_at || latestReturn.received_at || '') : '';
+      if (!latestReturn || retTime < outTime) {
+        throw new RepositoryError(
+          'VALIDATION_ERROR',
+          `Physical custody violation: Order ${order.order_number || order.id} is not physically at origin outlet (awaiting return receipt).`
+        );
+      }
+    }
+
+    // Invariant: Max one APPROVED rework request per order
+    const hasActiveApproved = sandbox.orderReworkRequests.some(
+      r => r.order_id === order.id && r.status === 'APPROVED'
+    );
+    if (hasActiveApproved) {
+      throw new RepositoryError(
+        'CONFLICT',
+        `Order ${order.order_number || order.id} already has an active approved rework request.`
+      );
+    }
+
+    const newRequest: OrderReworkRequest = {
+      id: 'rew-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7),
+      organization_id: order.organization_id,
+      order_id: order.id,
+      requested_by: effectiveActorId,
+      reason: dto.reason,
+      notes: dto.notes || null,
+      status: 'APPROVED',
+      created_at: new Date().toISOString(),
+      order,
+      requested_by_user: actor,
+    };
+
+    sandbox.orderReworkRequests.unshift(newRequest);
+    sandbox.save();
+    return newRequest;
+  },
+
+  async getOrderReworkRequests(orderId: string): Promise<OrderReworkRequest[]> {
+    if (isLiveSupabaseConfigured && supabase) {
+      const { data, error } = await supabase
+        .from('order_rework_requests')
+        .select('*, requested_by_user:users(*)')
+        .eq('order_id', orderId)
+        .order('created_at', { ascending: false });
+      if (error) throw normalizeRepositoryError(error);
+      return data as OrderReworkRequest[];
+    }
+
+    return sandbox.orderReworkRequests.filter(r => r.order_id === orderId);
+  },
+
+  async getActiveOrderReworkRequest(orderId: string): Promise<OrderReworkRequest | null> {
+    if (isLiveSupabaseConfigured && supabase) {
+      const { data, error } = await supabase
+        .from('order_rework_requests')
+        .select('*, requested_by_user:users(*)')
+        .eq('order_id', orderId)
+        .eq('status', 'APPROVED')
+        .maybeSingle();
+      if (error) throw normalizeRepositoryError(error);
+      return data as OrderReworkRequest | null;
+    }
+
+    return sandbox.orderReworkRequests.find(r => r.order_id === orderId && r.status === 'APPROVED') || null;
+  },
+
+  async cancelOrderReworkRequest(
+    requestId: string,
+    notes?: string,
+    actorId?: string
+  ): Promise<OrderReworkRequest> {
+    if (isLiveSupabaseConfigured && supabase) {
+      const { error } = await supabase.rpc('cancel_order_rework_request', {
+        p_request_id: requestId,
+        p_notes: notes || null,
+      });
+      if (error) throw normalizeRepositoryError(error);
+
+      const { data, error: fetchErr } = await supabase
+        .from('order_rework_requests')
+        .select('*')
+        .eq('id', requestId)
+        .single();
+      if (fetchErr) throw normalizeRepositoryError(fetchErr);
+      return data as OrderReworkRequest;
+    }
+
+    const req = sandbox.orderReworkRequests.find(r => r.id === requestId);
+    if (!req) {
+      throw new RepositoryError('NOT_FOUND', `Rework request ${requestId} tidak ditemukan.`);
+    }
+
+    if (req.status !== 'APPROVED') {
+      throw new RepositoryError(
+        'INVALID_STATE_TRANSITION',
+        `Illegal state: Only APPROVED rework requests can be cancelled (current: ${req.status}).`
+      );
+    }
+
+    req.status = 'CANCELLED';
+    req.cancelled_at = new Date().toISOString();
+    req.cancelled_by = actorId || DEMO_USERS[1].id;
+    if (notes) {
+      req.notes = (req.notes || '') + (req.notes ? ' | ' : '') + 'Batal: ' + notes;
+    }
+
+    sandbox.save();
+    return req;
+  },
+
+  async getWorkshopOrders(workshopBranchId: string): Promise<{
+    washQueue: Order[];
+    damagedQueue: Order[];
+  }> {
+    const allOrders = await this.getOrders();
+    const history = isLiveSupabaseConfigured
+      ? []
+      : sandbox.getHistoricalTransitItems();
+
+    const washQueue: Order[] = [];
+    const damagedQueue: Order[] = [];
+
+    for (const order of allOrders) {
+      if (order.production_branch_id !== workshopBranchId) continue;
+
+      if (order.branch_id === workshopBranchId) {
+        washQueue.push(order);
+      } else {
+        const custodyState = deriveOrderCustodyState(order, history);
+        if (custodyState === 'AT_WORKSHOP') {
+          washQueue.push(order);
+        } else if (custodyState === 'AT_WORKSHOP_DAMAGED') {
+          damagedQueue.push(order);
+        }
+      }
+    }
+
+    return { washQueue, damagedQueue };
   },
 
   resetSandbox() {

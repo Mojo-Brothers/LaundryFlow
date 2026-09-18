@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { repository } from '../../core/services/repository';
-import { Order, OrderStatus } from '../../core/types/database';
+import { Order, OrderStatus, OrderReworkRequest, ReworkReasonCode } from '../../core/types/database';
 import { formatIDR } from '../../core/utils/currency';
 import { notificationService } from '../../core/services/notification';
 import { usePosStore } from '../../core/store/posStore';
@@ -13,6 +13,9 @@ import {
   ExternalLink,
   ChevronRight,
   Filter,
+  RotateCcw,
+  X,
+  AlertCircle,
 } from 'lucide-react';
 import { ThermalReceipt } from '../../components/pos/ThermalReceipt';
 
@@ -23,9 +26,24 @@ export const OrdersView: React.FC = () => {
   const [selectedStatus, setSelectedStatus] = useState<string>('ALL');
   const [activeReceiptOrder, setActiveReceiptOrder] = useState<Order | null>(null);
 
+  // Rework Request State
+  const [reworkModalOrder, setReworkModalOrder] = useState<Order | null>(null);
+  const [reworkReason, setReworkReason] = useState<ReworkReasonCode>('CUSTOMER_COMPLAINT');
+  const [reworkNotes, setReworkNotes] = useState('');
+  const [reworkError, setReworkError] = useState<string | null>(null);
+  const [reworkSuccess, setReworkSuccess] = useState<string | null>(null);
+  const [activeReworkMap, setActiveReworkMap] = useState<Record<string, OrderReworkRequest | null>>({});
+
   const loadOrders = async () => {
     const list = await repository.getOrders();
     setOrders(list);
+
+    // Load active rework requests for orders
+    const map: Record<string, OrderReworkRequest | null> = {};
+    for (const o of list) {
+      map[o.id] = await repository.getActiveOrderReworkRequest(o.id);
+    }
+    setActiveReworkMap(map);
   };
 
   useEffect(() => {
@@ -73,6 +91,37 @@ export const OrdersView: React.FC = () => {
         return 'bg-rose-50 text-rose-700 border-rose-200';
       default:
         return 'bg-slate-100 text-slate-700 border-slate-200';
+    }
+  };
+
+  const handleOpenReworkModal = (order: Order) => {
+    setReworkModalOrder(order);
+    setReworkReason('CUSTOMER_COMPLAINT');
+    setReworkNotes('');
+    setReworkError(null);
+    setReworkSuccess(null);
+  };
+
+  const handleCreateReworkRequest = async () => {
+    if (!reworkModalOrder) return;
+    setReworkError(null);
+    try {
+      await repository.createOrderReworkRequest(
+        {
+          order_id: reworkModalOrder.id,
+          reason: reworkReason,
+          notes: reworkNotes.trim() || null,
+        },
+        currentUser.id
+      );
+      setReworkSuccess('Otorisasi Rework berhasil diterbitkan (APPROVED). Order siap dikirim outbound.');
+      await loadOrders();
+      setTimeout(() => {
+        setReworkModalOrder(null);
+        setReworkSuccess(null);
+      }, 1500);
+    } catch (err: any) {
+      setReworkError(err.message || 'Gagal mengajukan rework.');
     }
   };
 
@@ -142,6 +191,11 @@ export const OrdersView: React.FC = () => {
                     <span className={`px-2 py-0.5 rounded-md font-bold text-[10px] ${order.payment_status === 'PAID' ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'}`}>
                       {order.payment_status}
                     </span>
+                    {activeReworkMap[order.id] && (
+                      <span className="px-2 py-0.5 rounded-md font-bold text-[10px] bg-purple-100 text-purple-800 border border-purple-200 flex items-center gap-1">
+                        <RotateCcw className="w-2.5 h-2.5" /> Rework Approved
+                      </span>
+                    )}
                   </div>
 
                   <div className="flex items-center gap-3 text-slate-600">
@@ -195,6 +249,20 @@ export const OrdersView: React.FC = () => {
                       </button>
                     )}
 
+                    {/* Rework Button for non-terminal orders without active rework */}
+                    {!activeReworkMap[order.id] &&
+                      ['OWNER', 'ADMIN', 'MANAGER', 'BRANCH_MANAGER', 'CASHIER'].includes(currentUser?.role) &&
+                      !['CANCELLED', 'COMPLETED'].includes(order.status) && (
+                        <button
+                          onClick={() => handleOpenReworkModal(order)}
+                          className="px-2 py-1.5 rounded-lg text-purple-700 hover:bg-purple-50 border border-purple-200 transition flex items-center gap-1 text-xs font-semibold"
+                          title="Ajukan Cuci Ulang / Rework"
+                        >
+                          <RotateCcw className="w-3.5 h-3.5" />
+                          <span className="hidden sm:inline">Rework</span>
+                        </button>
+                      )}
+
                     {/* WhatsApp Launcher */}
                     <button
                       onClick={() => handleSendWhatsApp(order)}
@@ -230,6 +298,92 @@ export const OrdersView: React.FC = () => {
           </div>
         )}
       </div>
+
+      {/* Rework Request Modal */}
+      {reworkModalOrder && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 space-y-4 shadow-xl border border-slate-100">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex items-center gap-2">
+                <div className="p-2 rounded-xl bg-purple-100 text-purple-700">
+                  <RotateCcw className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900">Ajukan Cuci Ulang / Rework</h3>
+                  <p className="text-xs text-slate-500 font-mono">{reworkModalOrder.order_number}</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setReworkModalOrder(null)}
+                className="p-1 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {reworkError && (
+              <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{reworkError}</span>
+              </div>
+            )}
+
+            {reworkSuccess && (
+              <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 shrink-0" />
+                <span>{reworkSuccess}</span>
+              </div>
+            )}
+
+            <div className="space-y-3 text-xs">
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Alasan Cuci Ulang / Rework</label>
+                <select
+                  value={reworkReason}
+                  onChange={(e) => setReworkReason(e.target.value as ReworkReasonCode)}
+                  className="w-full p-2.5 rounded-xl border border-slate-300 bg-white font-medium text-slate-800 focus:ring-2 focus:ring-purple-500 outline-hidden"
+                >
+                  <option value="CUSTOMER_COMPLAINT">Komplain Pelanggan (CUSTOMER_COMPLAINT)</option>
+                  <option value="STAIN_REMAINS">Noda Masih Tertinggal (STAIN_REMAINS)</option>
+                  <option value="ODOR_REMAINS">Aroma Kurang Bersih / Apek (ODOR_REMAINS)</option>
+                  <option value="WRONG_TREATMENT">Penanganan Salah / Terlewat (WRONG_TREATMENT)</option>
+                  <option value="OUTLET_QC_REJECT">Ditolak QC Outlet (OUTLET_QC_REJECT)</option>
+                  <option value="OTHER">Lainnya (OTHER)</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Catatan Tambahan (Opsional)</label>
+                <textarea
+                  value={reworkNotes}
+                  onChange={(e) => setReworkNotes(e.target.value)}
+                  placeholder="Deskripsikan noda atau komplain pelanggan secara spesifik..."
+                  rows={3}
+                  className="w-full p-2.5 rounded-xl border border-slate-300 bg-white text-slate-800 focus:ring-2 focus:ring-purple-500 outline-hidden"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setReworkModalOrder(null)}
+                className="px-4 py-2 rounded-xl text-slate-600 font-bold hover:bg-slate-100 transition text-xs"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={handleCreateReworkRequest}
+                className="px-4 py-2 rounded-xl bg-purple-600 hover:bg-purple-700 text-white font-bold transition text-xs flex items-center gap-1.5 shadow-xs"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span>Terbitkan Otorisasi Rework</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Reprint Receipt Modal */}
       {activeReceiptOrder && (

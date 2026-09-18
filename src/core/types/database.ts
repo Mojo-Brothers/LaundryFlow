@@ -305,3 +305,32 @@ export interface AuditLog {
   after_data?: Record<string, any>;
   created_at: string;
 }
+
+export type ReworkRequestStatus = 'APPROVED' | 'CONSUMED' | 'CANCELLED';
+
+export type ReworkReasonCode =
+  | 'CUSTOMER_COMPLAINT'
+  | 'STAIN_REMAINS'
+  | 'ODOR_REMAINS'
+  | 'WRONG_TREATMENT'
+  | 'OUTLET_QC_REJECT'
+  | 'OTHER';
+
+export interface OrderReworkRequest {
+  id: string;
+  organization_id: string;
+  order_id: string;
+  requested_by: string;
+  reason: ReworkReasonCode;
+  notes?: string | null;
+  status: ReworkRequestStatus;
+  consumed_manifest_id?: string | null;
+  created_at: string;
+  consumed_at?: string | null;
+  cancelled_at?: string | null;
+  cancelled_by?: string | null;
+
+  // Joined relations
+  order?: Order;
+  requested_by_user?: UserProfile;
+}

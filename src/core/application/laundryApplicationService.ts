@@ -16,11 +16,14 @@ import {
   Service,
   PublicTrackingData,
   RoundingRule,
+  OrderReworkRequest,
+  ReworkReasonCode,
 } from '../types/database';
 import {
   repository,
   RepositoryError,
   RepositoryErrorCode,
+  CreateOrderReworkRequestDTO,
 } from '../services/repository';
 import {
   calculateItemPrice,
@@ -653,6 +656,60 @@ export class LaundryApplicationService {
         return null;
       }
       return await this.repo.getOrderByTrackingToken(cleanToken);
+    } catch (err) {
+      throw translateRepositoryError(err);
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // E. Multi-Cycle Rework Authorization Use Cases (Phase 4B)
+  // --------------------------------------------------------------------------
+
+  async createOrderReworkRequest(
+    dto: CreateOrderReworkRequestDTO,
+    actorId?: string
+  ): Promise<OrderReworkRequest> {
+    try {
+      if (!dto.order_id) {
+        throw new ApplicationError('VALIDATION_ERROR', 'order_id wajib diisi.');
+      }
+      if (!dto.reason) {
+        throw new ApplicationError('VALIDATION_ERROR', 'Alasan rework (reason) wajib diisi.');
+      }
+      return await this.repo.createOrderReworkRequest(dto, actorId);
+    } catch (err) {
+      throw translateRepositoryError(err);
+    }
+  }
+
+  async cancelOrderReworkRequest(
+    requestId: string,
+    notes?: string,
+    actorId?: string
+  ): Promise<OrderReworkRequest> {
+    try {
+      if (!requestId) {
+        throw new ApplicationError('VALIDATION_ERROR', 'requestId wajib diisi.');
+      }
+      return await this.repo.cancelOrderReworkRequest(requestId, notes, actorId);
+    } catch (err) {
+      throw translateRepositoryError(err);
+    }
+  }
+
+  async getOrderReworkRequests(orderId: string): Promise<OrderReworkRequest[]> {
+    try {
+      if (!orderId) return [];
+      return await this.repo.getOrderReworkRequests(orderId);
+    } catch (err) {
+      throw translateRepositoryError(err);
+    }
+  }
+
+  async getActiveOrderReworkRequest(orderId: string): Promise<OrderReworkRequest | null> {
+    try {
+      if (!orderId) return null;
+      return await this.repo.getActiveOrderReworkRequest(orderId);
     } catch (err) {
       throw translateRepositoryError(err);
     }
