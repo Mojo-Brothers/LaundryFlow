@@ -775,16 +775,29 @@ class LocalSandboxStorage {
     }
   }
 
+  private lastTimestamp = 0;
+
+  now(): string {
+    const current = Date.now();
+    if (current <= this.lastTimestamp) {
+      this.lastTimestamp += 1;
+    } else {
+      this.lastTimestamp = current;
+    }
+    return new Date(this.lastTimestamp).toISOString();
+  }
+
   reset() {
-    this.customers = [...DEMO_CUSTOMERS];
-    this.services = [...DEMO_SERVICES];
-    this.orders = [...DEMO_ORDERS];
-    this.shifts = [{ ...DEMO_SHIFT, opened_at: new Date().toISOString() }];
+    this.lastTimestamp = 0;
+    this.customers = JSON.parse(JSON.stringify(DEMO_CUSTOMERS));
+    this.services = JSON.parse(JSON.stringify(DEMO_SERVICES));
+    this.orders = JSON.parse(JSON.stringify(DEMO_ORDERS));
+    this.shifts = [{ ...DEMO_SHIFT, opened_at: this.now() }];
     this.statusHistory = [];
     this.payments = [];
-    this.manifests = [...DEMO_MANIFESTS];
-    this.manifestItems = [...DEMO_MANIFEST_ITEMS];
-    this.manifestHistory = [...DEMO_MANIFEST_HISTORY];
+    this.manifests = JSON.parse(JSON.stringify(DEMO_MANIFESTS));
+    this.manifestItems = JSON.parse(JSON.stringify(DEMO_MANIFEST_ITEMS));
+    this.manifestHistory = JSON.parse(JSON.stringify(DEMO_MANIFEST_HISTORY));
     this.orderReworkRequests = [];
     this.save();
   }
@@ -1486,8 +1499,8 @@ export const repository = {
     const src = branches.find(b => b.id === input.sourceBranchId)?.code || 'SRC';
     const dst = branches.find(b => b.id === input.destinationBranchId)?.code || 'DST';
     const manifestNumber = generateManifestNumber(src, dst);
-    const now = new Date().toISOString();
-    const manifestId = 'man-' + Date.now();
+    const now = sandbox.now();
+    const manifestId = 'man-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7);
     const orderCount = input.orderIds ? input.orderIds.length : 0;
 
     const newManifest: TransitManifest = {
@@ -1746,7 +1759,7 @@ export const repository = {
     }
 
     const fromStatus = manifest.status;
-    const now = new Date().toISOString();
+    const now = sandbox.now();
     manifest.status = targetStatus;
     manifest.updated_at = now;
     if (notes) manifest.notes = notes;
@@ -1808,7 +1821,7 @@ export const repository = {
       );
     }
 
-    const now = new Date().toISOString();
+    const now = sandbox.now();
     const inspectedActorId = actorId || DEMO_USERS[2].id;
     let receivedCount = 0;
     let hasDiscrepancy = false;
@@ -2196,21 +2209,23 @@ export const repository = {
             r => r.order_id === order.id && r.status === 'APPROVED'
           );
           if (rework) {
+            const itemNow = sandbox.now();
             rework.status = 'CONSUMED';
             rework.consumed_manifest_id = manifestId;
-            rework.consumed_at = new Date().toISOString();
+            rework.consumed_at = itemNow;
           }
         }
       }
     }
 
+    const itemNow = sandbox.now();
     const newItem: TransitManifestItem = {
       id: 'mitem-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7),
       manifest_id: manifestId,
       organization_id: manifest.organization_id,
       order_id: orderId,
       received_status: 'EXPECTED',
-      added_at: new Date().toISOString(),
+      added_at: itemNow,
     };
     sandbox.manifestItems.push(newItem);
     manifest.total_expected_orders = (manifest.total_expected_orders || 0) + 1;
@@ -2404,7 +2419,7 @@ export const repository = {
       reason: dto.reason,
       notes: dto.notes || null,
       status: 'APPROVED',
-      created_at: new Date().toISOString(),
+      created_at: sandbox.now(),
       order,
       requested_by_user: actor,
     };
@@ -2477,7 +2492,7 @@ export const repository = {
     }
 
     req.status = 'CANCELLED';
-    req.cancelled_at = new Date().toISOString();
+    req.cancelled_at = sandbox.now();
     req.cancelled_by = actorId || DEMO_USERS[1].id;
     if (notes) {
       req.notes = (req.notes || '') + (req.notes ? ' | ' : '') + 'Batal: ' + notes;
