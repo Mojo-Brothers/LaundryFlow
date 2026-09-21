@@ -31,6 +31,13 @@ describe('Repository Dual-Mode Contract & Error Normalization', () => {
       expect(typeof repository.getTransitManifestHistory).toBe('function');
       expect(typeof repository.getEligibleOrdersForTransit).toBe('function');
 
+      // Phase 4B Rework Gate & Workshop Kanban methods
+      expect(typeof repository.createOrderReworkRequest).toBe('function');
+      expect(typeof repository.getOrderReworkRequests).toBe('function');
+      expect(typeof repository.getActiveOrderReworkRequest).toBe('function');
+      expect(typeof repository.cancelOrderReworkRequest).toBe('function');
+      expect(typeof repository.getWorkshopOrders).toBe('function');
+
       // Reset method
       expect(typeof repository.resetSandbox).toBe('function');
     });
@@ -77,6 +84,28 @@ describe('Repository Dual-Mode Contract & Error Normalization', () => {
       const err = normalizeRepositoryError(new Error('Connection timeout to host'));
       expect(err).toBeInstanceOf(RepositoryError);
       expect(err.code).toBe('DATABASE_ERROR');
+    });
+
+    it('normalizes rework gate custody violations to VALIDATION_ERROR', () => {
+      const err = normalizeRepositoryError(new Error('Physical custody violation: Order ORD-001 is not physically at origin outlet'));
+      expect(err).toBeInstanceOf(RepositoryError);
+      expect(err.code).toBe('VALIDATION_ERROR');
+    });
+
+    it('normalizes cross-tenant violations to FORBIDDEN', () => {
+      const err = normalizeRepositoryError(new Error('Cross-tenant violation: Order belongs to another organization.'));
+      expect(err).toBeInstanceOf(RepositoryError);
+      expect(err.code).toBe('FORBIDDEN');
+    });
+  });
+
+  describe('3. Workshop Kanban & Custody Segregation Contract', () => {
+    it('returns washQueue and damagedQueue arrays complying with the contract', async () => {
+      const result = await repository.getWorkshopOrders('test-workshop-id');
+      expect(result).toHaveProperty('washQueue');
+      expect(result).toHaveProperty('damagedQueue');
+      expect(Array.isArray(result.washQueue)).toBe(true);
+      expect(Array.isArray(result.damagedQueue)).toBe(true);
     });
   });
 });

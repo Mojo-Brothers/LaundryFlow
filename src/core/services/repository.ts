@@ -135,6 +135,7 @@ export function normalizeRepositoryError(err: unknown): RepositoryError {
   }
   if (
     lower.includes('cross-branch') ||
+    lower.includes('custody') ||
     lower.includes('tidak eligible') ||
     lower.includes('not eligible') ||
     lower.includes('different') ||
@@ -2507,9 +2508,37 @@ export const repository = {
     damagedQueue: Order[];
   }> {
     const allOrders = await this.getOrders();
-    const history = isLiveSupabaseConfigured
-      ? []
-      : sandbox.getHistoricalTransitItems();
+    let history: HistoricalTransitItem[] = [];
+
+    if (isLiveSupabaseConfigured && supabase) {
+      const externalOrders = allOrders.filter(
+        o => o.production_branch_id === workshopBranchId && o.branch_id !== workshopBranchId
+      );
+
+      if (externalOrders.length > 0) {
+        const orderIds = externalOrders.map(o => o.id);
+        const { data: rawHistory, error: histErr } = await supabase
+          .from('transit_manifest_items')
+          .select('order_id, received_status, received_at, manifest:transit_manifests!inner(source_branch_id, destination_branch_id, status, received_at)')
+          .in('order_id', orderIds);
+
+        if (histErr) throw normalizeRepositoryError(histErr);
+
+        history = (rawHistory || []).map((h: any) => ({
+          order_id: h.order_id,
+          received_status: h.received_status,
+          received_at: h.received_at,
+          manifest: {
+            source_branch_id: h.manifest.source_branch_id,
+            destination_branch_id: h.manifest.destination_branch_id,
+            status: h.manifest.status,
+            received_at: h.manifest.received_at,
+          },
+        }));
+      }
+    } else {
+      history = sandbox.getHistoricalTransitItems();
+    }
 
     const washQueue: Order[] = [];
     const damagedQueue: Order[] = [];
