@@ -23,3 +23,21 @@ export const shiftKeys = {
   summaries: () => [...shiftKeys.all, 'summary'] as const,
   summary: (shiftId: string) => [...shiftKeys.summaries(), shiftId] as const,
 };
+
+export const productionKeys = {
+  all: ['production'] as const,
+  jobs: () => [...productionKeys.all, 'job'] as const,
+  byOrder: (orderId: string) => [...productionKeys.jobs(), 'order', orderId] as const,
+  byId: (jobId: string) => [...productionKeys.jobs(), 'id', jobId] as const,
+  byWorkshop: (workshopBranchId: string) =>
+    [...productionKeys.all, 'workshop', workshopBranchId] as const,
+};
+
+export const orderKeys = {
+  all: ['orders'] as const,
+  lists: () => [...orderKeys.all, 'list'] as const,
+  list: (branchId?: string) => [...orderKeys.lists(), branchId ?? 'all'] as const,
+  details: () => [...orderKeys.all, 'detail'] as const,
+  detail: (id: string) => [...orderKeys.details(), id] as const,
+  workshop: (branchId?: string) => [...orderKeys.all, 'workshop', branchId ?? 'all'] as const,
+};

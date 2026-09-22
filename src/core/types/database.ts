@@ -114,6 +114,7 @@ export interface Service {
   rounding_rule: RoundingRule;
   estimated_duration_hours: number;
   is_active: boolean;
+  standard_stages?: ProductionStage[];
   created_at: string;
   updated_at: string;
 }
@@ -333,4 +334,98 @@ export interface OrderReworkRequest {
   // Joined relations
   order?: Order;
   requested_by_user?: UserProfile;
+}
+
+// ----------------------------------------------------------------------------
+// Production Domain Types (Step 4C.3 Implementation & Step 4C.3.3 Reconciliation)
+// ----------------------------------------------------------------------------
+
+export type ProductionJobStatus = 'IN_PROGRESS' | 'COMPLETED' | 'CANCELLED';
+
+export type WorkItemStatus = 'IN_PROGRESS' | 'SPLIT' | 'COMPLETED' | 'CANCELLED';
+
+export type ProductionStage =
+  | 'WASHING'
+  | 'DRYING'
+  | 'IRONING'
+  | 'PACKED'
+  | 'SPECIAL_TREATMENT';
+
+export type ProductionStageTransitionType =
+  | 'START'
+  | 'ADVANCE'
+  | 'QC_PASS'
+  | 'QC_FAIL'
+  | 'SPLIT'
+  | 'CANCEL';
+
+export type SplitReason =
+  | 'CAPACITY_OVERFLOW'
+  | 'QC_DEFECT_ISOLATION'
+  | 'TREATMENT_SEGREGATION';
+
+export interface ProductionJob {
+  id: string;
+  organization_id: string;
+  order_id: string;
+  branch_id: string;
+  rework_request_id?: string | null;
+  status: ProductionJobStatus;
+  notes?: string | null;
+  created_by: string;
+  created_at: string;
+  completed_at?: string | null;
+  completed_by?: string | null;
+  cancelled_at?: string | null;
+  cancelled_by?: string | null;
+  updated_at: string;
+
+  // Joined relations
+  order?: Order;
+  branch?: Branch;
+  work_items?: ProductionWorkItem[];
+  rework_request?: OrderReworkRequest | null;
+}
+
+export interface ProductionWorkItem {
+  id: string;
+  job_id: string;
+  organization_id: string;
+  order_item_id: string;
+  service_id: string;
+  parent_item_id?: string | null;
+  item_code: string;
+  service_name_snap: string;
+  unit: ServiceUnit;
+  quantity: number;
+  service_stages: ProductionStage[];
+  current_stage: ProductionStage;
+  stage_index: number;
+  status: WorkItemStatus;
+  split_reason?: SplitReason | null;
+  notes?: string | null;
+  created_at: string;
+  updated_at: string;
+
+  // Joined relations
+  order_item?: OrderItem;
+  service?: Service;
+  parent_item?: ProductionWorkItem | null;
+  child_items?: ProductionWorkItem[];
+  stage_logs?: ProductionStageLog[];
+}
+
+export interface ProductionStageLog {
+  id: string;
+  work_item_id: string;
+  organization_id: string;
+  from_stage?: ProductionStage | null;
+  to_stage: ProductionStage;
+  transition_type: ProductionStageTransitionType;
+  actor_id: string;
+  notes?: string | null;
+  created_at: string;
+
+  // Joined relations
+  actor?: UserProfile;
 }

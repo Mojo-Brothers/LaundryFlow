@@ -18,6 +18,10 @@ import {
   RoundingRule,
   OrderReworkRequest,
   ReworkReasonCode,
+  ProductionJob,
+  ProductionWorkItem,
+  ProductionStage,
+  SplitReason,
 } from '../types/database';
 import {
   repository,
@@ -25,6 +29,10 @@ import {
   RepositoryErrorCode,
   CreateOrderReworkRequestDTO,
 } from '../services/repository';
+import {
+  productionRepository,
+  IProductionRepository,
+} from '../services/productionRepository';
 import {
   calculateItemPrice,
   CalculationInput,
@@ -195,7 +203,10 @@ export type LaundryRepositoryPort = typeof repository;
 // ============================================================================
 
 export class LaundryApplicationService {
-  constructor(private readonly repo: LaundryRepositoryPort = repository) {}
+  constructor(
+    private readonly repo: LaundryRepositoryPort = repository,
+    private readonly prodRepo: IProductionRepository = productionRepository
+  ) {}
 
   // --------------------------------------------------------------------------
   // A. Multi-Outlet Transit Manifest Use Cases
@@ -714,7 +725,215 @@ export class LaundryApplicationService {
       throw translateRepositoryError(err);
     }
   }
+
+  // --------------------------------------------------------------------------
+  // F. Production Domain Orchestration Use Cases (Phase 4C)
+  // Architecture Boundary: UI -> Application Service -> ProductionRepository -> SQL RPC
+  // Invariant Compliance:
+  // - Zero duplicate database state machine or custody calculation
+  // - Zero direct orders.status mutation (all status projections owned by SQL RPC)
+  // - Pure use-case parameter normalization and structured error translation
+  // --------------------------------------------------------------------------
+
+  /**
+   * Orchestrates the initialization of a production job for an order.
+   * Performs basic parameter validation before delegating to the ProductionRepository.
+   * Authoritative custody gates, rework token verification, RLS, and WASHING projection
+   * are strictly owned and executed by the database RPC (start_production_job).
+   */
+  async startProduction(orderId: string): Promise<ProductionJob> {
+    try {
+      const cleanOrderId = (orderId || '').trim();
+      if (!cleanOrderId) {
+        throw new ApplicationError('VALIDATION_ERROR', 'ID order wajib diisi untuk memulai produksi.');
+      }
+      return await this.prodRepo.startProductionJob(cleanOrderId);
+    } catch (err) {
+      throw translateRepositoryError(err);
+    }
+  }
+
+  /**
+   * Advances a work item sequentially to its next standard service stage.
+   * The database RPC determines current_stage -> next_stage and detects terminal PACKED stage.
+   * The Application Service does NOT compute the next stage.
+   */
+  async advanceWorkItem(workItemId: string, notes?: string): Promise<void> {
+    try {
+      const cleanWorkItemId = (workItemId || '').trim();
+      if (!cleanWorkItemId) {
+        throw new ApplicationError('VALIDATION_ERROR', 'ID work item wajib diisi.');
+      }
+      const cleanNotes = notes?.trim() || undefined;
+      await this.prodRepo.advanceWorkItemStage(cleanWorkItemId, cleanNotes);
+    } catch (err) {
+      throw translateRepositoryError(err);
+    }
+  }
+
+  /**
+   * Splits a work item into child batches due to capacity overflow, QC defect isolation,
+   * or treatment segregation.
+   * Basic input shape is validated at the application boundary (>= 2 quantities, all > 0, valid reason).
+   * Exact quantity conservation, lineage depth (max 1), integer constraints, and atomic child
+   * creation are strictly enforced by the PostgreSQL RPC (split_work_item).
+   */
+  async splitWorkItem(
+    workItemId: string,
+    splitQuantities: number[],
+    splitReason: SplitReason,
+    notes?: string
+  ): Promise<void> {
+    try {
+      const cleanWorkItemId = (workItemId || '').trim();
+      if (!cleanWorkItemId) {
+        throw new ApplicationError('VALIDATION_ERROR', 'ID work item wajib diisi.');
+      }
+
+      if (!Array.isArray(splitQuantities) || splitQuantities.length < 2) {
+        throw new ApplicationError(
+          'VALIDATION_ERROR',
+          'Pemisahan work item (split) membutuhkan minimal 2 porsi kuantitas.'
+        );
+      }
+
+      for (const qty of splitQuantities) {
+        if (typeof qty !== 'number' || isNaN(qty) || qty <= 0) {
+          throw new ApplicationError(
+            'VALIDATION_ERROR',
+            'Setiap kuantitas pecahan split harus berupa angka positif yang lebih besar dari 0.'
+          );
+        }
+      }
+
+      const validReasons: SplitReason[] = [
+        'CAPACITY_OVERFLOW',
+        'QC_DEFECT_ISOLATION',
+        'TREATMENT_SEGREGATION',
+      ];
+      if (!splitReason || !validReasons.includes(splitReason)) {
+        throw new ApplicationError(
+          'VALIDATION_ERROR',
+          `Alasan split tidak valid. Pilihan valid: ${validReasons.join(', ')}.`
+        );
+      }
+
+      const cleanNotes = notes?.trim() || undefined;
+      await this.prodRepo.splitWorkItem(cleanWorkItemId, splitQuantities, splitReason, cleanNotes);
+    } catch (err) {
+      throw translateRepositoryError(err);
+    }
+  }
+
+  /**
+   * Evaluates quality control for a work item at the terminal PACKED stage.
+   * If QC fails, a remediation stage is strictly required.
+   * If QC passes, remediation stage is omitted.
+   * Authoritative stage rewind or completion marking and audit logs are recorded by the RPC.
+   */
+  async evaluateQC(
+    workItemId: string,
+    passed: boolean,
+    remediationStage?: ProductionStage,
+    notes?: string
+  ): Promise<void> {
+    try {
+      const cleanWorkItemId = (workItemId || '').trim();
+      if (!cleanWorkItemId) {
+        throw new ApplicationError('VALIDATION_ERROR', 'ID work item wajib diisi.');
+      }
+
+      if (typeof passed !== 'boolean') {
+        throw new ApplicationError('VALIDATION_ERROR', 'Status kelulusan QC (passed) wajib berupa boolean.');
+      }
+
+      if (!passed && !remediationStage) {
+        throw new ApplicationError(
+          'VALIDATION_ERROR',
+          'Tahapan remediasi (remediationStage) wajib ditentukan saat evaluasi QC tidak lolos (FAIL).'
+        );
+      }
+
+      const cleanNotes = notes?.trim() || undefined;
+      const targetRemediation = passed ? undefined : remediationStage;
+
+      await this.prodRepo.qcEvaluateWorkItem(
+        cleanWorkItemId,
+        passed,
+        targetRemediation,
+        cleanNotes
+      );
+    } catch (err) {
+      throw translateRepositoryError(err);
+    }
+  }
+
+  /**
+   * Completes a granular production job.
+   * All active work items must have reached terminal COMPLETED status.
+   * The database RPC handles atomic completion, rework token status, and projects local orders to READY.
+   * The Application Service does NOT call repository.updateOrderStatus().
+   */
+  async completeProduction(jobId: string): Promise<void> {
+    try {
+      const cleanJobId = (jobId || '').trim();
+      if (!cleanJobId) {
+        throw new ApplicationError('VALIDATION_ERROR', 'ID production job wajib diisi.');
+      }
+      await this.prodRepo.completeProductionJob(cleanJobId);
+    } catch (err) {
+      throw translateRepositoryError(err);
+    }
+  }
+
+  /**
+   * Completes production for an order operating in SIMPLE mode.
+   * The database RPC executes complete_simple_production_job: creating/completing the job,
+   * advancing all items, and projecting local orders to READY.
+   * The Application Service does NOT call repository.updateOrderStatus().
+   */
+  async completeSimpleProduction(orderId: string): Promise<void> {
+    try {
+      const cleanOrderId = (orderId || '').trim();
+      if (!cleanOrderId) {
+        throw new ApplicationError('VALIDATION_ERROR', 'ID order wajib diisi.');
+      }
+      await this.prodRepo.completeSimpleProductionJob(cleanOrderId);
+    } catch (err) {
+      throw translateRepositoryError(err);
+    }
+  }
+
+  /**
+   * Retrieves the production job (with nested work items and stage logs) for a given order ID.
+   */
+  async getProductionJob(orderId: string): Promise<ProductionJob | null> {
+    try {
+      const cleanOrderId = (orderId || '').trim();
+      if (!cleanOrderId) {
+        return null;
+      }
+      return await this.prodRepo.getProductionJobWithItems(cleanOrderId);
+    } catch (err) {
+      throw translateRepositoryError(err);
+    }
+  }
+
+  /**
+   * Retrieves the production job by its primary key job ID.
+   */
+  async getProductionJobById(jobId: string): Promise<ProductionJob | null> {
+    try {
+      const cleanJobId = (jobId || '').trim();
+      if (!cleanJobId) {
+        return null;
+      }
+      return await this.prodRepo.getProductionJobById(cleanJobId);
+    } catch (err) {
+      throw translateRepositoryError(err);
+    }
+  }
 }
 
 // Singleton Application Service Instance
-export const applicationService = new LaundryApplicationService(repository);
+export const applicationService = new LaundryApplicationService(repository, productionRepository);
