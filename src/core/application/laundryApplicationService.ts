@@ -22,6 +22,7 @@ import {
   ProductionWorkItem,
   ProductionStage,
   SplitReason,
+  WorkshopProductionReadModel,
 } from '../types/database';
 import {
   repository,
@@ -929,6 +930,24 @@ export class LaundryApplicationService {
         return null;
       }
       return await this.prodRepo.getProductionJobById(cleanJobId);
+    } catch (err) {
+      throw translateRepositoryError(err);
+    }
+  }
+
+  /**
+   * Retrieves the workshop production read model containing active production jobs
+   * and active leaf work items for a given workshop branch.
+   * Performs parameter validation and structured error translation.
+   * Does NOT compute state transitions or access Supabase directly.
+   */
+  async getWorkshopProduction(workshopBranchId: string): Promise<WorkshopProductionReadModel> {
+    try {
+      const cleanBranchId = (workshopBranchId || '').trim();
+      if (!cleanBranchId) {
+        throw new ApplicationError('VALIDATION_ERROR', 'ID workshop branch wajib diisi.');
+      }
+      return await this.prodRepo.getWorkshopProduction(cleanBranchId);
     } catch (err) {
       throw translateRepositoryError(err);
     }

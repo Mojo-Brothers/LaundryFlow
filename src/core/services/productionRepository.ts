@@ -11,6 +11,9 @@ import {
   ProductionStage,
   SplitReason,
   Order,
+  WorkshopProductionReadModel,
+  WorkshopProductionWorkItem,
+  WorkshopProductionJobSummary,
 } from '../types/database';
 import { supabase, isLiveSupabaseConfigured } from '../supabase/client';
 import { RepositoryError, normalizeRepositoryError, repository } from './repository';
@@ -34,6 +37,7 @@ export interface IProductionRepository {
   completeSimpleProductionJob(orderId: string): Promise<void>;
   getProductionJobWithItems(orderId: string): Promise<ProductionJob | null>;
   getProductionJobById(jobId: string): Promise<ProductionJob | null>;
+  getWorkshopProduction(workshopBranchId: string): Promise<WorkshopProductionReadModel>;
   resetSandbox?(): void;
 }
 
@@ -99,10 +103,27 @@ export class ProductionRepository implements IProductionRepository {
       throw new RepositoryError('NOT_FOUND', `Order ${orderId} tidak ditemukan.`);
     }
 
-    // Idempotency: check if initial job already exists for order
-    const existingJob = this.sandbox.jobs.find(
-      (j) => j.order_id === orderId && (!j.rework_request_id || j.rework_request_id === null)
-    );
+    // Active rework cycle check simulation (parity with start_production_job RPC)
+    const reworkRequests = await repository.getOrderReworkRequests(orderId);
+    const activeRework = reworkRequests
+      .filter((r) => r.status === 'CONSUMED')
+      .sort(
+        (a, b) =>
+          new Date(b.consumed_at || b.created_at).getTime() -
+          new Date(a.consumed_at || a.created_at).getTime()
+      )[0];
+    const reworkId = activeRework?.id || null;
+
+    // Idempotency: check if job already exists for this fulfillment cycle
+    let existingJob: ProductionJob | undefined;
+    if (reworkId) {
+      existingJob = this.sandbox.jobs.find((j) => j.rework_request_id === reworkId);
+    } else {
+      existingJob = this.sandbox.jobs.find(
+        (j) => j.order_id === orderId && (!j.rework_request_id || j.rework_request_id === null)
+      );
+    }
+
     if (existingJob) {
       return (await this.getProductionJobById(existingJob.id))!;
     }
@@ -130,7 +151,7 @@ export class ProductionRepository implements IProductionRepository {
       organization_id: order.organization_id,
       order_id: orderId,
       branch_id: order.production_branch_id,
-      rework_request_id: null,
+      rework_request_id: reworkId,
       status: 'IN_PROGRESS',
       notes: null,
       created_by: 'system',
@@ -146,7 +167,7 @@ export class ProductionRepository implements IProductionRepository {
     let seq = 0;
     for (const oi of orderItems) {
       seq++;
-      const workItemId = `pwi-${Date.now()}-${seq}`;
+      const workItemId = `pwi-${Date.now()}-${seq}-${Math.floor(Math.random() * 10000)}`;
       const defaultStages: ProductionStage[] = ['WASHING', 'DRYING', 'IRONING', 'PACKED'];
       const svc = services.find((s) => s.id === oi.service_id);
       const stages = svc?.standard_stages || defaultStages;
@@ -559,7 +580,7 @@ export class ProductionRepository implements IProductionRepository {
     );
 
     for (const item of items) {
-      while (item.stage_index < item.service_stages.length) {
+      while (item.stage_index < item.service_stages.length && item.status === 'IN_PROGRESS') {
         await this.advanceWorkItemStage(
           item.id,
           `Proses otomatis mode simpel ke tahapan ${item.service_stages[item.stage_index]}`
@@ -662,6 +683,120 @@ export class ProductionRepository implements IProductionRepository {
     return {
       ...job,
       work_items: workItems,
+    };
+  }
+
+  // ==========================================================================
+  // 9. getWorkshopProduction
+  // High-performance bulk read model for Workshop Kanban board
+  // Returns all active jobs and active leaf work items for workshop branch
+  // ==========================================================================
+  async getWorkshopProduction(workshopBranchId: string): Promise<WorkshopProductionReadModel> {
+    if (isLiveSupabaseConfigured && supabase) {
+      const { data, error } = await supabase.rpc('get_workshop_production', {
+        p_workshop_branch_id: workshopBranchId,
+      });
+
+      if (error) throw normalizeRepositoryError(error);
+      return data as WorkshopProductionReadModel;
+    }
+
+    // --- Sandbox Simulation ---
+    const cleanBranchId = (workshopBranchId || '').trim();
+    if (!cleanBranchId) {
+      throw new RepositoryError('VALIDATION_ERROR', 'ID workshop branch wajib diisi.');
+    }
+
+    const activeJobs = this.sandbox.jobs.filter(
+      (j) => j.branch_id === cleanBranchId && j.status === 'IN_PROGRESS'
+    );
+
+    const orders = await repository.getOrders();
+    const customers = await repository.getCustomers();
+    const branches = await repository.getBranches();
+    const currentBranch = branches.find((b) => b.id === cleanBranchId);
+
+    const jobSummaries: WorkshopProductionJobSummary[] = [];
+    const activeWorkItems: WorkshopProductionWorkItem[] = [];
+
+    for (const job of activeJobs) {
+      const order = orders.find((o: Order) => o.id === job.order_id);
+      const customer = order
+        ? customers.find((c) => c.id === order.customer_id && c.organization_id === order.organization_id)
+        : undefined;
+      const orderNumber = order?.order_number || job.order?.order_number || 'ORD-UNKNOWN';
+      const customerName = customer?.name || 'Pelanggan';
+
+      // Active leaf items: exclude SPLIT parents and CANCELLED items
+      const items = this.sandbox.workItems.filter(
+        (w) => w.job_id === job.id && w.status !== 'SPLIT' && w.status !== 'CANCELLED'
+      );
+
+      jobSummaries.push({
+        id: job.id,
+        order_id: job.order_id,
+        order_number: orderNumber,
+        customer_name: customerName,
+        branch_id: job.branch_id,
+        rework_request_id: job.rework_request_id || null,
+        is_rework: Boolean(job.rework_request_id),
+        status: job.status,
+        created_at: job.created_at,
+        work_items_count: items.length,
+      });
+
+      for (const item of items) {
+        activeWorkItems.push({
+          id: item.id,
+          job_id: item.job_id,
+          order_id: job.order_id,
+          order_number: orderNumber,
+          customer_name: customerName,
+          order_item_id: item.order_item_id,
+          service_id: item.service_id,
+          item_code: item.item_code,
+          service_name: item.service_name_snap,
+          service_name_snap: item.service_name_snap,
+          unit: item.unit,
+          quantity: item.quantity,
+          service_stages: item.service_stages,
+          current_stage: item.current_stage,
+          stage_index: item.stage_index,
+          status: item.status,
+          parent_item_id: item.parent_item_id || null,
+          split_reason: item.split_reason || null,
+          job_status: job.status,
+          rework_request_id: job.rework_request_id || null,
+          is_rework: Boolean(job.rework_request_id),
+          job_created_at: job.created_at,
+          workshop_branch_id: job.branch_id,
+          workshop_branch_name: currentBranch?.name,
+          notes: item.notes || null,
+          created_at: item.created_at,
+        });
+      }
+    }
+
+    // Deterministic ordering parity: created_at ASC with stable id ASC tie-breaker
+    jobSummaries.sort((a, b) => {
+      const timeDiff = new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+      if (timeDiff !== 0) return timeDiff;
+      return a.id.localeCompare(b.id);
+    });
+
+    activeWorkItems.sort((a, b) => {
+      const timeDiff = new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+      if (timeDiff !== 0) return timeDiff;
+      return a.id.localeCompare(b.id);
+    });
+
+    return {
+      workshop_branch_id: cleanBranchId,
+      workshop_branch_name: currentBranch?.name,
+      jobs_count: jobSummaries.length,
+      work_items_count: activeWorkItems.length,
+      jobs: jobSummaries,
+      work_items: activeWorkItems,
     };
   }
 }

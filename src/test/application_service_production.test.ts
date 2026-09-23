@@ -382,6 +382,7 @@ describe('LaundryApplicationService — Production Domain Orchestration (Step 4C
         completeSimpleProductionJob: vi.fn().mockRejectedValue(new RepositoryError('FINANCIAL_VALIDATION_ERROR', 'Financial error')),
         getProductionJobWithItems: vi.fn().mockResolvedValue(null),
         getProductionJobById: vi.fn().mockResolvedValue(null),
+        getWorkshopProduction: vi.fn().mockRejectedValue(new RepositoryError('FORBIDDEN', 'Akses workshop ditolak')),
       };
 
       const customService = new LaundryApplicationService(repository, mockProdRepo);
@@ -404,6 +405,11 @@ describe('LaundryApplicationService — Production Domain Orchestration (Step 4C
       await expect(customService.completeProduction('job-1')).rejects.toMatchObject({
         code: 'NOT_FOUND',
         message: 'Job tidak ditemukan',
+      });
+
+      await expect(customService.getWorkshopProduction('branch-1')).rejects.toMatchObject({
+        code: 'FORBIDDEN',
+        message: 'Akses workshop ditolak',
       });
     });
   });

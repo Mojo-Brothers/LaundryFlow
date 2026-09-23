@@ -429,3 +429,59 @@ export interface ProductionStageLog {
   // Joined relations
   actor?: UserProfile;
 }
+
+// ============================================================================
+// Workshop Production Read Model Types (Step 4C.4C-B.2)
+// High-performance, bulk-aggregated read contract for Workshop Kanban boards
+// ============================================================================
+
+export interface WorkshopProductionWorkItem {
+  id: string; // work_item_id
+  job_id: string;
+  order_id: string;
+  order_number: string;
+  customer_name?: string;
+  order_item_id: string;
+  service_id: string;
+  item_code: string;
+  service_name: string;
+  service_name_snap: string;
+  unit: ServiceUnit;
+  quantity: number;
+  service_stages: ProductionStage[];
+  current_stage: ProductionStage;
+  stage_index: number;
+  status: WorkItemStatus;
+  parent_item_id?: string | null;
+  split_reason?: SplitReason | null;
+  job_status: ProductionJobStatus;
+  rework_request_id?: string | null;
+  is_rework: boolean;
+  job_created_at: string;
+  workshop_branch_id: string;
+  workshop_branch_name?: string;
+  notes?: string | null;
+  created_at: string;
+}
+
+export interface WorkshopProductionJobSummary {
+  id: string;
+  order_id: string;
+  order_number: string;
+  customer_name?: string;
+  branch_id: string;
+  rework_request_id?: string | null;
+  is_rework: boolean;
+  status: ProductionJobStatus;
+  created_at: string;
+  work_items_count: number;
+}
+
+export interface WorkshopProductionReadModel {
+  workshop_branch_id: string;
+  workshop_branch_name?: string;
+  jobs_count: number;
+  work_items_count: number;
+  jobs: WorkshopProductionJobSummary[];
+  work_items: WorkshopProductionWorkItem[];
+}

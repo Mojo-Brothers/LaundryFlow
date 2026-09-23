@@ -10,6 +10,7 @@ import {
   ProductionJob,
   ProductionStage,
   SplitReason,
+  WorkshopProductionReadModel,
 } from '../../types/database';
 
 // ============================================================================
@@ -61,6 +62,19 @@ export function useProductionJobById(jobId: string | undefined | null) {
   return useQuery<ProductionJob | null, Error>({
     queryKey: productionKeys.byId(cleanId || ''),
     queryFn: () => applicationService.getProductionJobById(cleanId!),
+    enabled: Boolean(cleanId && cleanId.length > 0),
+  });
+}
+
+/**
+ * Hook to retrieve the active workshop production read model.
+ * Disabled when workshopBranchId is empty or undefined.
+ */
+export function useWorkshopProduction(workshopBranchId: string | undefined | null) {
+  const cleanId = workshopBranchId?.trim();
+  return useQuery<WorkshopProductionReadModel, Error>({
+    queryKey: productionKeys.byWorkshop(cleanId || ''),
+    queryFn: () => applicationService.getWorkshopProduction(cleanId!),
     enabled: Boolean(cleanId && cleanId.length > 0),
   });
 }
