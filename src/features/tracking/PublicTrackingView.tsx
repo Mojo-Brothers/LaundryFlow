@@ -88,6 +88,22 @@ export const PublicTrackingView: React.FC = () => {
   return (
     <div className="min-h-screen bg-gradient-to-b from-sky-50/50 via-slate-50 to-white text-slate-900 py-10 px-4 sm:px-6">
       <div className="max-w-xl mx-auto space-y-6">
+        {/* Top Demo Simulation Banner */}
+        <div className="bg-amber-50 border border-amber-200 rounded-2xl p-3 flex items-center justify-between text-xs text-amber-900 shadow-2xs">
+          <div className="flex items-center gap-2">
+            <span className="font-extrabold uppercase px-2 py-0.5 rounded-full bg-amber-200 text-amber-900 text-[9px] tracking-wider">
+              Demo Simulation
+            </span>
+            <span className="text-[11px] font-medium">Pelacakan Publik Simulasi (Local Sandbox)</span>
+          </div>
+          <Link
+            to="/"
+            className="text-[11px] font-bold text-sky-700 underline hover:text-sky-900"
+          >
+            Kembali ke Kasir POS &rarr;
+          </Link>
+        </div>
+
         {/* Brand Header */}
         <div className="text-center space-y-1">
           <div className="inline-flex items-center justify-center w-12 h-12 rounded-2xl bg-gradient-to-tr from-sky-600 to-indigo-600 text-white shadow-lg shadow-sky-600/20 mb-2">

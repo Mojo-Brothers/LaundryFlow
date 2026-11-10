@@ -54,6 +54,39 @@ export class ProductionRepository implements IProductionRepository {
     stageLogs: [],
   };
 
+  constructor() {
+    this.loadFromStorage();
+  }
+
+  private loadFromStorage(): void {
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        const savedJobs = localStorage.getItem('lf_prod_jobs');
+        const savedItems = localStorage.getItem('lf_prod_work_items');
+        const savedLogs = localStorage.getItem('lf_prod_stage_logs');
+        if (savedJobs && savedItems) {
+          this.sandbox.jobs = JSON.parse(savedJobs);
+          this.sandbox.workItems = JSON.parse(savedItems);
+          this.sandbox.stageLogs = savedLogs ? JSON.parse(savedLogs) : [];
+        }
+      }
+    } catch {
+      // fallback to in-memory state on quota or unavailable storage
+    }
+  }
+
+  private saveToStorage(): void {
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        localStorage.setItem('lf_prod_jobs', JSON.stringify(this.sandbox.jobs));
+        localStorage.setItem('lf_prod_work_items', JSON.stringify(this.sandbox.workItems));
+        localStorage.setItem('lf_prod_stage_logs', JSON.stringify(this.sandbox.stageLogs));
+      }
+    } catch {
+      // ignore quota errors
+    }
+  }
+
   /**
    * Resets sandbox state for testing and demo isolation
    */
@@ -63,6 +96,15 @@ export class ProductionRepository implements IProductionRepository {
       workItems: [],
       stageLogs: [],
     };
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        localStorage.removeItem('lf_prod_jobs');
+        localStorage.removeItem('lf_prod_work_items');
+        localStorage.removeItem('lf_prod_stage_logs');
+      }
+    } catch {
+      // ignore
+    }
   }
 
   // ==========================================================================
@@ -208,6 +250,7 @@ export class ProductionRepository implements IProductionRepository {
       });
     }
 
+    this.saveToStorage();
     return (await this.getProductionJobById(jobId))!;
   }
 
@@ -268,6 +311,8 @@ export class ProductionRepository implements IProductionRepository {
       notes: notes || 'Tahapan produksi dilanjutkan',
       created_at: new Date().toISOString(),
     });
+
+    this.saveToStorage();
   }
 
   // ==========================================================================
@@ -402,6 +447,8 @@ export class ProductionRepository implements IProductionRepository {
         created_at: new Date().toISOString(),
       });
     }
+
+    this.saveToStorage();
   }
 
   // ==========================================================================
@@ -494,6 +541,8 @@ export class ProductionRepository implements IProductionRepository {
         created_at: new Date().toISOString(),
       });
     }
+
+    this.saveToStorage();
   }
 
   // ==========================================================================
@@ -554,6 +603,8 @@ export class ProductionRepository implements IProductionRepository {
       }
       // Central production: remains WASHING until return transit receipt at origin
     }
+
+    this.saveToStorage();
   }
 
   // ==========================================================================

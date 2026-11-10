@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { repository } from '../../core/services/repository';
+import { applicationService } from '../../core/application/laundryApplicationService';
 import { Order, OrderStatus, OrderReworkRequest, ReworkReasonCode } from '../../core/types/database';
 import { formatIDR } from '../../core/utils/currency';
 import { notificationService } from '../../core/services/notification';
@@ -52,6 +53,13 @@ export const OrdersView: React.FC = () => {
 
   const handleAdvanceStatus = async (order: Order, nextStatus: OrderStatus) => {
     await repository.updateOrderStatus(order.id, nextStatus, currentUser.id);
+    if (nextStatus === 'WASHING' && order.branch_id === order.production_branch_id) {
+      try {
+        await applicationService.startProduction(order.id);
+      } catch {
+        // idempotent if already started or custody check
+      }
+    }
     await loadOrders();
   };
 

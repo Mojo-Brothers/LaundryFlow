@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { usePosStore } from '../../core/store/posStore';
 import { repository } from '../../core/services/repository';
+import { productionRepository } from '../../core/services/productionRepository';
 import { Branch, UserProfile, CashierShift } from '../../core/types/database';
 import {
   Sparkles,
@@ -49,6 +50,14 @@ export const Navbar: React.FC<NavbarProps> = ({ onOpenShiftModal }) => {
     }
   }, [currentBranch]);
 
+  const handleResetDemo = () => {
+    if (confirm('Kembalikan seluruh data demo ke kondisi awal (Laundry Sejahtera)? Semua data pesanan yang baru Anda buat akan di-reset.')) {
+      repository.resetSandbox();
+      productionRepository.resetSandbox?.();
+      window.location.reload();
+    }
+  };
+
   const navItems = [
     { label: 'Kasir POS', path: '/', icon: ShoppingBag },
     { label: 'Pesanan', path: '/orders', icon: Search },
@@ -60,6 +69,30 @@ export const Navbar: React.FC<NavbarProps> = ({ onOpenShiftModal }) => {
 
   return (
     <header className="sticky top-0 z-40 bg-white border-b border-slate-200 shadow-xs">
+      {/* Top Global Interactive Demo Notice Banner */}
+      <div className="bg-gradient-to-r from-amber-600 via-orange-600 to-amber-700 text-white text-[11px] sm:text-xs py-1.5 px-4 shadow-inner">
+        <div className="max-w-7xl mx-auto flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <span className="font-extrabold uppercase px-2 py-0.5 rounded-full bg-black/25 tracking-wider text-[10px]">
+              Interactive Demo
+            </span>
+            <span className="text-amber-100 font-medium">
+              Data simulasi tersimpan secara lokal di browser Anda (Local Sandbox). Bebas dari database cloud.
+            </span>
+          </div>
+          <div className="flex items-center gap-3 shrink-0 self-end sm:self-auto">
+            <button
+              onClick={handleResetDemo}
+              className="font-bold underline hover:text-amber-200 flex items-center gap-1 transition cursor-pointer"
+              title="Kembalikan data demo ke fixture awal"
+            >
+              <RotateCcw className="w-3 h-3" />
+              <span>Reset Data Demo</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex items-center justify-between h-16 gap-4">
           {/* Logo & Brand */}
@@ -72,6 +105,7 @@ export const Navbar: React.FC<NavbarProps> = ({ onOpenShiftModal }) => {
                 <div className="flex items-center gap-1.5">
                   <span className="font-extrabold text-lg tracking-tight text-slate-900">LaundryFlow</span>
                   <span className="text-[10px] uppercase font-bold tracking-wider px-1.5 py-0.5 rounded bg-sky-100 text-sky-700">OS</span>
+                  <span className="text-[10px] uppercase font-bold tracking-wider px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 border border-amber-200">DEMO</span>
                 </div>
                 <p className="text-[10px] text-slate-500 font-medium">Laundry Operating System</p>
               </div>
@@ -166,14 +200,9 @@ export const Navbar: React.FC<NavbarProps> = ({ onOpenShiftModal }) => {
 
             {/* Reset Sandbox Data Button */}
             <button
-              onClick={() => {
-                if (confirm('Kembalikan data demo ke kondisi awal (Laundry Sejahtera)?')) {
-                  repository.resetSandbox();
-                  window.location.reload();
-                }
-              }}
+              onClick={handleResetDemo}
               className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition"
-              title="Reset Sandbox Data"
+              title="Reset Data Demo ke Kondisi Awal"
             >
               <RotateCcw className="w-4 h-4" />
             </button>

@@ -55,6 +55,12 @@ export const ThermalReceipt: React.FC<ThermalReceiptProps> = ({
             id="thermal-receipt"
             className="bg-white p-4 border border-dashed border-slate-300 rounded-xl font-mono text-xs text-slate-800"
           >
+            {/* Visual Demo Watermark Banner */}
+            <div className="text-center py-1 bg-amber-50 text-amber-800 border border-dashed border-amber-300 rounded mb-2 text-[10px] font-bold tracking-wider">
+              *** NOTA SIMULASI DEMO ***<br />
+              BUKAN BUKTI TRANSAKSI RESMI
+            </div>
+
             {/* Business Header */}
             <div className="text-center pb-3 border-b border-dashed border-slate-300">
               <h2 className="text-base font-bold tracking-tight text-slate-900 uppercase">
@@ -167,6 +173,10 @@ export const ThermalReceipt: React.FC<ThermalReceiptProps> = ({
                 <br />
                 Terima kasih atas kepercayaan Anda!
               </p>
+
+              <div className="pt-2 text-[8px] text-amber-700 font-bold uppercase tracking-wider">
+                LaundryFlow OS • Interactive Demo Sandbox
+              </div>
             </div>
           </div>
 

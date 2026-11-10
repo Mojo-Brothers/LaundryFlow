@@ -13,6 +13,9 @@ export const isLiveSupabaseConfigured = Boolean(
   !supabaseUrl.includes('placeholder')
 );
 
+// Explicit Interactive Demo Mode Flag
+export const isDemoMode = !isLiveSupabaseConfigured || import.meta.env.VITE_DEMO_MODE === 'true';
+
 // Standard Supabase client (only uses public/anon key, never service role key!)
 export const supabase = isLiveSupabaseConfigured
   ? createClient(supabaseUrl, supabaseAnonKey, {

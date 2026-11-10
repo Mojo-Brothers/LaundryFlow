@@ -27,6 +27,7 @@ import {
 } from '../../core/types/database';
 import {
   useWorkshopProduction,
+  useStartProduction,
   useAdvanceWorkItem,
   useSplitWorkItem,
   useEvaluateQC,
@@ -116,6 +117,7 @@ export const ProductionKanbanView: React.FC<ProductionKanbanViewProps> = ({
   } = useWorkshopProduction(activeWorkshopBranchId || undefined);
 
   // Mutation Hooks
+  const startProductionMutation = useStartProduction();
   const advanceMutation = useAdvanceWorkItem();
   const splitMutation = useSplitWorkItem();
   const evaluateQCMutation = useEvaluateQC();
@@ -123,6 +125,7 @@ export const ProductionKanbanView: React.FC<ProductionKanbanViewProps> = ({
 
   // Error banners from any mutation
   const activeMutationError =
+    startProductionMutation.error ||
     advanceMutation.error ||
     splitMutation.error ||
     evaluateQCMutation.error ||
@@ -371,6 +374,21 @@ export const ProductionKanbanView: React.FC<ProductionKanbanViewProps> = ({
               Semua cucian telah selesai atau belum ada pesanan yang masuk ke tahap produksi workshop.
             </p>
           )}
+
+          {/* Quick Demo Job Trigger */}
+          <div className="pt-2">
+            <button
+              type="button"
+              onClick={() => {
+                startProductionMutation.mutate('77777777-7777-7777-7777-777777777771');
+              }}
+              disabled={startProductionMutation.isPending}
+              className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold shadow-xs transition inline-flex items-center gap-1.5 disabled:opacity-50"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${startProductionMutation.isPending ? 'animate-spin' : ''}`} />
+              <span>{startProductionMutation.isPending ? 'Memuat antrean...' : 'Muat Antrean Produksi Demo (BKS-2609-0001)'}</span>
+            </button>
+          </div>
         </div>
       )}
 
